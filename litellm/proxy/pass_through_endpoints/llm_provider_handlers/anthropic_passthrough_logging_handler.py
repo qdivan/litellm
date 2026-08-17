@@ -28,6 +28,7 @@ from litellm.proxy.pass_through_endpoints.llm_provider_handlers.batch_attributio
     optional_str,
     request_tags_from_metadata,
 )
+from litellm.proxy.pass_through_endpoints.upstream_usage_headers import has_upstream_reported_usage
 from litellm.types.passthrough_endpoints.pass_through_endpoints import (
     PassthroughStandardLoggingPayload,
 )
@@ -288,11 +289,12 @@ class AnthropicPassthroughLoggingHandler:
                 )
             )
 
-            kwargs["response_cost"] = response_cost
+            if not has_upstream_reported_usage(logging_obj):
+                kwargs["response_cost"] = response_cost
+                # the pass-through success path reads spend from
+                # model_call_details["response_cost"], not from kwargs
+                logging_obj.model_call_details["response_cost"] = response_cost
             kwargs["model"] = model
-            # the pass-through success path reads spend from
-            # model_call_details["response_cost"], not from kwargs
-            logging_obj.model_call_details["response_cost"] = response_cost
             passthrough_logging_payload: Final[PassthroughStandardLoggingPayload | None] = kwargs.get(
                 "passthrough_logging_payload"
             )

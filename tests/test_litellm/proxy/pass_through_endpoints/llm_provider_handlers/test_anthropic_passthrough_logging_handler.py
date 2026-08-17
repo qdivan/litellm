@@ -16,6 +16,7 @@ from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
 from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import (
     AnthropicPassthroughLoggingHandler,
 )
+from litellm.proxy.pass_through_endpoints.upstream_usage_headers import apply_upstream_reported_usage
 
 
 async def _drain_tasks():
@@ -2432,3 +2433,42 @@ class TestAnthropicPassthroughFastMode:
 
         assert fast.usage.speed == "fast"
         assert self._cost(fast) == pytest.approx(self._expected_fast_cost(self._cost(standard)))
+
+
+@patch("litellm.completion_cost")
+def test_non_streaming_preserves_upstream_reported_cost(
+    mock_completion_cost,
+):
+    import httpx
+
+    from litellm.types.utils import ModelResponse
+
+    mock_completion_cost.return_value = 0.001
+    logging_obj = MagicMock()
+    logging_obj.model_call_details = {}
+    logging_obj.litellm_params = {}
+    logging_obj.get_router_model_id.return_value = None
+    apply_upstream_reported_usage(
+        logging_obj=logging_obj,
+        headers=httpx.Headers(
+            {
+                "x-litellm-response-cost": "0.777777",
+                "x-litellm-total-tokens": "4242",
+            }
+        ),
+    )
+    response = MagicMock(spec=ModelResponse)
+    response.id = "test-id"
+    response.model = "gpt-4o"
+
+    kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+        litellm_model_response=response,
+        model="gpt-4o",
+        kwargs={},
+        start_time=datetime.now(),
+        end_time=datetime.now(),
+        logging_obj=logging_obj,
+    )
+
+    assert "response_cost" not in kwargs
+    assert logging_obj.model_call_details["response_cost"] == 0.777777
