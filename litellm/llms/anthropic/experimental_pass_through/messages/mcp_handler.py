@@ -143,6 +143,8 @@ async def anthropic_messages_with_mcp(
         tool_use_blocks = _extract_tool_use_blocks(response)
         if not tool_use_blocks:
             break
+        if any(tool_use_block.get("name") not in tool_server_map for tool_use_block in tool_use_blocks):
+            break
 
         tool_results = await LiteLLM_Proxy_MCP_Handler._execute_tool_calls(
             tool_server_map=tool_server_map,

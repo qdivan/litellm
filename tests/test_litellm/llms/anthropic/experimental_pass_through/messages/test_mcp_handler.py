@@ -151,7 +151,7 @@ async def test_anthropic_messages_with_mcp_forwards_the_callers_mcp_credentials(
         litellm_call_id="call-456",
     )
 
-    process = AsyncMock(return_value=([], {}))
+    process = AsyncMock(return_value=([], {"t": "deepwiki"}))
     execute = AsyncMock(return_value=[{"tool_call_id": "toolu_1", "result": "ok", "name": "t"}])
     responses = [
         {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "toolu_1", "name": "t", "input": {}}]},
@@ -241,3 +241,39 @@ async def test_anthropic_messages_with_mcp_stops_when_every_tool_call_is_skipped
         "With no tool results there is nothing to send back, so the loop must not call the model again"
     )
     assert result == tool_use_response
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_with_mcp_passes_through_mixed_tool_use_turns():
+    from litellm.llms.anthropic.experimental_pass_through.messages import mcp_handler
+    from litellm.responses.mcp.request_context import MCPRequestContext
+
+    response = {
+        "stop_reason": "tool_use",
+        "content": [
+            {"type": "tool_use", "id": "toolu_mcp", "name": "search_docs", "input": {}},
+            {"type": "tool_use", "id": "toolu_client", "name": "Read", "input": {}},
+        ],
+    }
+    execute = AsyncMock(return_value=[{"tool_call_id": "toolu_mcp", "result": "ok", "name": "search_docs"}])
+    anthropic_messages_mock = AsyncMock(return_value=response)
+
+    with patch.object(
+        MCPRequestContext, "resolve", return_value=MCPRequestContext(user_api_key_auth="auth")
+    ), patch(
+        "litellm.responses.mcp.litellm_proxy_mcp_handler.LiteLLM_Proxy_MCP_Handler._process_mcp_tools_without_openai_transform",
+        new=AsyncMock(return_value=([], {"search_docs": "docs"})),
+    ), patch(
+        "litellm.responses.mcp.litellm_proxy_mcp_handler.LiteLLM_Proxy_MCP_Handler._execute_tool_calls",
+        new=execute,
+    ), patch("litellm.anthropic_messages", new=anthropic_messages_mock):
+        result = await mcp_handler.anthropic_messages_with_mcp(
+            max_tokens=100,
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-sonnet-4-5",
+            tools=[MCP_REFERENCE, {"name": "Read", "input_schema": {"type": "object"}}],
+        )
+
+    assert result == response
+    execute.assert_not_awaited()
+    assert anthropic_messages_mock.await_count == 1
