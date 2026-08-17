@@ -5473,6 +5473,16 @@ def completion(
         # reasoningSummary/reasoning_summary without tools (AI SDK) that the first
         # (early) check doesn't cover.
         _reasoning_summary_for_bridge: Final = peek_reasoning_summary_aliases(optional_params)
+        _auto_reasoning_summary_for_bridge: Final = (
+            "detailed"
+            if litellm.reasoning_auto_summary or os.getenv("LITELLM_REASONING_AUTO_SUMMARY", "false").lower() == "true"
+            else None
+        )
+        _effective_reasoning_summary_for_bridge: Final = (
+            _reasoning_summary_for_bridge
+            if _reasoning_summary_for_bridge is not None
+            else _auto_reasoning_summary_for_bridge
+        )
         if responses_api_model_info.get("mode") != "responses":
             responses_api_model_info, model = responses_api_bridge_check(
                 model=model,
@@ -5480,7 +5490,7 @@ def completion(
                 web_search_options=web_search_options,
                 tools=tools,
                 reasoning_effort=reasoning_effort,
-                reasoning_summary=_reasoning_summary_for_bridge,
+                reasoning_summary=_effective_reasoning_summary_for_bridge,
                 api_base=api_base,
             )
 

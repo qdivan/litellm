@@ -1286,6 +1286,68 @@ def test_completion_optional_params_base_model(
         assert call_kwargs["base_model"] == expected_base_model_param
 
 
+def test_completion_stream_maps_auto_reasoning_summary_to_reasoning_progress():
+    responses_events = (
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "Planning the answer",
+            "summary_index": 0,
+        },
+        {"type": "response.output_text.delta", "delta": "Final answer"},
+        {"type": "response.completed", "response": {"output": [], "usage": None}},
+    )
+
+    with (
+        patch.object(litellm, "reasoning_auto_summary", True),
+        patch(
+            "litellm.responses",
+            return_value=iter(json.dumps(event) for event in responses_events),
+        ) as mock_responses,
+        patch("litellm.main.openai_chat_completions.completion") as mock_chat_completion,
+    ):
+        stream = litellm.completion(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "ok"}],
+            stream=True,
+            reasoning_effort="medium",
+            api_key="fake-key",
+        )
+
+        mock_responses.assert_called_once()
+        mock_chat_completion.assert_not_called()
+        chunks = list(stream)
+
+    assert [
+        getattr(chunk.choices[0].delta, "reasoning_content", None)
+        for chunk in chunks
+        if getattr(chunk.choices[0].delta, "reasoning_content", None)
+    ] == ["Planning the answer"]
+    assert "".join(chunk.choices[0].delta.content or "" for chunk in chunks) == "Final answer"
+    assert all(chunk.choices[0].delta.content != "Planning the answer" for chunk in chunks)
+
+
+def test_reasoning_auto_summary_does_not_reroute_non_reasoning_model():
+    native_stream = iter(())
+    with (
+        patch.object(litellm, "reasoning_auto_summary", True),
+        patch("litellm.responses") as mock_responses,
+        patch(
+            "litellm.main.openai_chat_completions.completion",
+            return_value=native_stream,
+        ) as mock_chat_completion,
+    ):
+        stream = litellm.completion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "ok"}],
+            stream=True,
+            api_key="fake-key",
+        )
+
+    mock_responses.assert_not_called()
+    mock_chat_completion.assert_called_once()
+    assert stream is native_stream
+
+
 @patch("litellm.completion_extras.responses_api_bridge.completion")
 def test_gpt_5_4_responses_bridge_merges_reasoning_summary_kwarg_without_tools(
     mock_responses_completion,

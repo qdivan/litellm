@@ -240,7 +240,7 @@ def test_openai_responses_chunk_parser_reasoning_summary():
         "item_id": "rs_686d544208748198b6912e27b7c299c00e24bd875d35bade",
         "output_index": 0,
         "sequence_number": 4,
-        "summary_index": 0,
+        "summary_index": 2,
         "type": "response.reasoning_summary_text.delta",
     }
 
@@ -257,6 +257,40 @@ def test_openai_responses_chunk_parser_reasoning_summary():
     assert delta.reasoning_content == "**Compar"
     assert delta.tool_calls is None
     assert delta.function_call is None
+
+
+def test_openai_responses_chunk_parser_ignores_empty_reasoning_summary():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=None, sync_stream=True)
+
+    result = iterator.chunk_parser(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "",
+            "summary_index": 0,
+        }
+    )
+
+    assert not hasattr(result.choices[0].delta, "reasoning_content")
+    assert result.choices[0].delta.content == ""
+
+
+def test_openai_responses_stream_propagates_read_timeout_without_progress_chunk():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    def timeout_stream():
+        raise httpx.ReadTimeout("provider stream timed out")
+        yield
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(streaming_response=timeout_stream(), sync_stream=True)
+
+    with pytest.raises(httpx.ReadTimeout, match="provider stream timed out"):
+        next(iterator)
 
 
 def test_chunk_parser_string_output_text_delta_produces_text():
