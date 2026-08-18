@@ -2876,6 +2876,17 @@ def test_native_provider_routes_are_unchanged(method, path, expected_name):
     assert _resolve_route_name(method, path) == expected_name
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/anthropic/v1/files",
+        "/anthropic/v1/files/",
+    ],
+)
+def test_anthropic_files_routes_to_anthropic_passthrough(path):
+    assert _resolve_route_name("POST", path) == "anthropic_proxy_route"
+
+
 class TestCursorProxyRoute:
     """Tests for the Cursor Cloud Agents pass-through route."""
 
