@@ -4,17 +4,18 @@ import logging
 import math
 import time
 import traceback
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from datetime import datetime
 from functools import lru_cache
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple, Protocol, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple, Protocol, TypeVar, overload
 
 import anyio
 import httpx
 import orjson
 from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import TypeAdapter, ValidationError
 from starlette.types import Receive, Scope, Send
 
 import litellm
@@ -62,6 +63,8 @@ from litellm.types.utils import ServerToolUse
 StreamChunkSerializer = Callable[[Any], str]
 # Type alias for streaming error serializer (ProxyException -> wire format)
 StreamErrorSerializer = Callable[[ProxyException], str]
+_StreamChunk = TypeVar("_StreamChunk")
+_STRING_OBJECT_MAPPING: Final = TypeAdapter(dict[str, object])
 
 if TYPE_CHECKING:
     from litellm.proxy.proxy_server import ProxyConfig as _ProxyConfig
@@ -2924,6 +2927,60 @@ class ProxyBaseLLMRequestProcessing:
             return chunk
 
     @staticmethod
+    def _anthropic_content_block_event_from_payload(payload: object) -> tuple[str, int] | None:
+        try:
+            event: Final = _STRING_OBJECT_MAPPING.validate_python(payload)
+        except ValidationError:
+            return None
+        event_type: Final = event.get("type")
+        index: Final = event.get("index")
+        if event_type not in ("content_block_start", "content_block_stop") or not isinstance(index, int):
+            return None
+        return str(event_type), index
+
+    @staticmethod
+    def _anthropic_content_block_event(chunk: object) -> tuple[str, int] | None:
+        if isinstance(chunk, dict):
+            return ProxyBaseLLMRequestProcessing._anthropic_content_block_event_from_payload(json.loads(safe_dumps(chunk)))
+        if isinstance(chunk, (bytes, bytearray)):
+            try:
+                text = bytes(chunk).decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        elif isinstance(chunk, str):
+            text = chunk
+        else:
+            return None
+        if "content_block_st" not in text:
+            return None
+        data_line: Final = next((line for line in text.splitlines() if line.strip().startswith("data:")), None)
+        if data_line is None:
+            return None
+        try:
+            return ProxyBaseLLMRequestProcessing._anthropic_content_block_event_from_payload(
+                json.loads(data_line.split(":", 1)[1].strip())
+            )
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    async def _deduplicate_anthropic_content_block_stops(
+        chunks: AsyncIterator[_StreamChunk],
+    ) -> AsyncGenerator[_StreamChunk, None]:
+        closed_content_block_indexes: set[int] = set()  # mutable-ok: tracks one stream's block lifecycle
+        async for chunk in chunks:
+            block_event = ProxyBaseLLMRequestProcessing._anthropic_content_block_event(chunk)
+            if block_event is not None:
+                event_type, block_index = block_event
+                if event_type == "content_block_start":
+                    closed_content_block_indexes.discard(block_index)
+                elif block_index in closed_content_block_indexes:
+                    continue
+                else:
+                    closed_content_block_indexes.add(block_index)
+            yield chunk
+
+    @staticmethod
     async def _finalize_streaming_generator_cleanup(
         request: Request | None,
         request_data: dict,
@@ -3006,10 +3063,12 @@ class ProxyBaseLLMRequestProcessing:
         delivered_chunk = False
         try:
             str_so_far = ""
-            async for chunk in proxy_logging_obj.async_post_call_streaming_iterator_hook(
-                user_api_key_dict=user_api_key_dict,
-                response=response,
-                request_data=request_data,
+            async for chunk in ProxyBaseLLMRequestProcessing._deduplicate_anthropic_content_block_stops(
+                proxy_logging_obj.async_post_call_streaming_iterator_hook(
+                    user_api_key_dict=user_api_key_dict,
+                    response=response,
+                    request_data=request_data,
+                )
             ):
                 # ``.format(chunk)`` was previously evaluated for every chunk
                 # regardless of log level; gate it behind the level check.

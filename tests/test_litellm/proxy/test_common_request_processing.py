@@ -3366,6 +3366,35 @@ class TestAsyncStreamingDataGeneratorFastPath:
 
         ProxyLogging._callback_capabilities_cache.clear()
 
+    @pytest.mark.asyncio
+    async def test_drops_duplicate_anthropic_content_block_stops(self, monkeypatch):
+        monkeypatch.setattr(litellm, "callbacks", [])
+        ProxyLogging._callback_capabilities_cache.clear()
+
+        chunks = [
+            b'event: content_block_start\ndata: {"type":"content_block_start","index":0}\n\n',
+            b'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+            b'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+            b'event: content_block_start\ndata: {"type":"content_block_start","index":0}\n\n',
+            b'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        ]
+        proxy_logging_obj = ProxyLogging(user_api_key_cache=MagicMock())
+
+        output = [
+            chunk
+            async for chunk in ProxyBaseLLMRequestProcessing.async_streaming_data_generator(
+                response=self._aiter(chunks),
+                user_api_key_dict=MagicMock(spec=UserAPIKeyAuth),
+                request_data={"model": "claude-x"},
+                proxy_logging_obj=proxy_logging_obj,
+                serialize_chunk=ProxyBaseLLMRequestProcessing.return_sse_chunk,
+                serialize_error=lambda error: "data: error\n\n",
+            )
+        ]
+
+        assert output == [chunks[0], chunks[1], chunks[3], chunks[4]]
+        ProxyLogging._callback_capabilities_cache.clear()
+
 
 class TestDisconnectGatherCleanup:
     def _disconnect_request(self) -> Request:
