@@ -1,20 +1,20 @@
+import importlib
 import subprocess
 import sys
 import textwrap
 import types
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
-import importlib
 
 from litellm.proxy._experimental.mcp_server.faults.list_outcomes import AggregateToolListing
 from litellm.responses.mcp.litellm_proxy_mcp_handler import (
     LiteLLM_Proxy_MCP_Handler,
 )
-from typing import Any, cast
-from litellm.types.utils import ModelResponse
 from litellm.types.responses.main import OutputFunctionToolCall
+from litellm.types.utils import ModelResponse
 
 
 class _DummyMCPResult:
@@ -282,6 +282,26 @@ async def test_execute_tool_calls_keeps_tool_name_when_equal_to_server(monkeypat
     assert call_tool_mock.await_count == 1
     assert call_tool_mock.await_args is not None
     assert call_tool_mock.await_args.kwargs["name"] == tool_name
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_skips_calls_absent_from_the_mcp_tool_map(monkeypatch):
+    call_tool_mock = _setup_mcp_call_environment(monkeypatch)
+    monkeypatch.setitem(sys.modules, "litellm.proxy.proxy_server", types.SimpleNamespace(proxy_logging_obj=None))
+    tool_calls = [
+        {"type": "tool_use", "id": "toolu_mcp", "name": "search_docs", "input": {}},
+        {"type": "tool_use", "id": "toolu_client", "name": "Read", "input": {"path": "README.md"}},
+    ]
+
+    results = await LiteLLM_Proxy_MCP_Handler._execute_tool_calls(
+        tool_server_map={"search_docs": "docs"},
+        tool_calls=tool_calls,
+        user_api_key_auth=None,
+    )
+
+    assert call_tool_mock.await_count == 1
+    assert call_tool_mock.await_args.kwargs["name"] == "search_docs"
+    assert [result["tool_call_id"] for result in results] == ["toolu_mcp"]
 
 
 @pytest.mark.asyncio
