@@ -14,11 +14,20 @@ from litellm.proxy.openai_files_endpoints.common_utils import (
 )
 from litellm.types.utils import LiteLLMBatch
 
-
 UNIFIED_BATCH_ID = "litellm_proxy;model_id:my-model;llm_batch_id:batch-raw-123"
 ENCODED_UNIFIED_BATCH_ID = (
     base64.urlsafe_b64encode(UNIFIED_BATCH_ID.encode()).decode().rstrip("=")
 )
+
+
+def _managed_file_id(raw_file_id: str) -> str:
+    payload = (
+        "litellm_proxy:application/json;unified_id,test-file;"
+        "target_model_names,gpt-5.6-batch;"
+        f"llm_output_file_id,{raw_file_id};"
+        "llm_output_file_model_id,test-model"
+    )
+    return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
 
 
 def _build_batch_response(
@@ -107,6 +116,50 @@ async def test_ensure_batch_response_registers_output_and_error_file_ids():
     ]
     assert {"my-model": "file-raw-output"} in mappings
     assert {"my-model": "file-raw-error"} in mappings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_attr, backend_file_id", (("output_file_id", "file-backend-output"), ("error_file_id", "file-backend-error")))
+async def test_ensure_batch_response_rewraps_chained_proxy_file_ids(file_attr, backend_file_id):
+    backend_unified_file_id = _managed_file_id(backend_file_id)
+    response = _build_batch_response(output_file_id=None, error_file_id=None)
+    setattr(response, file_attr, backend_unified_file_id)
+    managed_files = _build_managed_files_mock(unified_id="file-front-managed")
+
+    await ensure_batch_response_managed_file_ids(
+        response=response,
+        managed_files_obj=managed_files,
+        prisma_client=_build_prisma_mock(),
+        verbose_proxy_logger=MagicMock(),
+        db_batch_object=SimpleNamespace(created_by="batch-owner", team_id="team-owner"),
+        unified_batch_id=UNIFIED_BATCH_ID,
+    )
+
+    assert getattr(response, file_attr) == "file-front-managed"
+    assert managed_files.store_unified_file_id.call_args.kwargs["model_mappings"] == {
+        "my-model": backend_unified_file_id
+    }
+
+
+@pytest.mark.asyncio
+async def test_ensure_batch_response_preserves_stored_managed_file_id():
+    stored_unified_file_id = _managed_file_id("file-front-output")
+    response = _build_batch_response(output_file_id=stored_unified_file_id)
+    managed_files = _build_managed_files_mock()
+    prisma = _build_prisma_mock()
+    prisma.db.litellm_managedfiletable.find_first = AsyncMock(return_value=SimpleNamespace())
+
+    await ensure_batch_response_managed_file_ids(
+        response=response,
+        managed_files_obj=managed_files,
+        prisma_client=prisma,
+        verbose_proxy_logger=MagicMock(),
+        db_batch_object=SimpleNamespace(created_by="batch-owner", team_id="team-owner"),
+        unified_batch_id=UNIFIED_BATCH_ID,
+    )
+
+    assert response.output_file_id == stored_unified_file_id
+    managed_files.store_unified_file_id.assert_not_called()
 
 
 @pytest.mark.asyncio

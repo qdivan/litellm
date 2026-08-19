@@ -1103,6 +1103,16 @@ async def resolve_output_file_ids_to_unified(response, prisma_client) -> None:
             pass
 
 
+async def is_stored_managed_file_id(file_id: str, prisma_client: "PrismaClient | None") -> bool:
+    if not _is_base64_encoded_unified_file_id(file_id) or not prisma_client:
+        return False
+    try:
+        managed_file = await ManagedFileRepository(prisma_client).table.find_first(where={"unified_file_id": file_id})
+        return managed_file is not None
+    except Exception:  # noqa: BLE001  # lookup failure makes the ID eligible for rewrap
+        return False
+
+
 async def map_raw_file_ids_to_unified(
     raw_file_ids: frozenset[str], prisma_client: "PrismaClient | None"
 ) -> Mapping[str, str]:
@@ -1160,7 +1170,7 @@ async def ensure_batch_response_managed_file_ids(
 
     for file_attr in ("output_file_id", "error_file_id"):
         raw_file_id = getattr(response, file_attr, None)
-        if not raw_file_id or _is_base64_encoded_unified_file_id(raw_file_id):
+        if not raw_file_id or await is_stored_managed_file_id(raw_file_id, prisma_client):
             continue
         try:
             new_unified_file_id = managed_files_obj.get_unified_output_file_id(
