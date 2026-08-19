@@ -7,8 +7,10 @@ Handles search tool selection, load balancing, and fallback logic for search req
 import asyncio
 import random
 import traceback
+import types
 from collections.abc import Callable
 from functools import partial
+from itertools import chain
 from typing import Any, Final
 
 from litellm._logging import verbose_router_logger
@@ -20,28 +22,6 @@ class SearchAPIRouter:
 
     Provides methods for search tool selection, load balancing, and fallback handling.
     """
-
-    @staticmethod
-    def _resolve_search_provider_credentials(
-        *,
-        tool_litellm_params: dict[str, Any],
-    ) -> tuple[str | None, str | None]:
-        """
-        Resolve search provider credentials from tool configuration ONLY.
-
-        Credentials are stored only in search_tool.litellm_params, never in team/key metadata.
-        This ensures secrets are not exposed in team/key API responses.
-
-        Args:
-            tool_litellm_params: Search tool litellm_params with credentials
-
-        Returns:
-            Tuple of (api_key, api_base) from tool configuration
-        """
-        resolved_api_key: Final[str | None] = tool_litellm_params.get("api_key")
-        resolved_api_base: Final[str | None] = tool_litellm_params.get("api_base")
-
-        return resolved_api_key, resolved_api_base
 
     @staticmethod
     async def update_router_search_tools(router_instance: Any, search_tools: list):
@@ -211,19 +191,19 @@ class SearchAPIRouter:
             if not search_provider:
                 raise ValueError(f"search_provider not found in litellm_params for search tool '{search_tool_name}'")
 
-            api_key, api_base = SearchAPIRouter._resolve_search_provider_credentials(
-                tool_litellm_params=litellm_params,
+            search_params: Final = types.MappingProxyType(
+                dict(
+                    chain(
+                        ((key, value) for key, value in litellm_params.items() if key != "search_provider"),
+                        kwargs.items(),
+                        (("search_provider", search_provider),),
+                    )
+                )
             )
 
             verbose_router_logger.debug("Selected search tool with provider: %s", search_provider)
 
-            # Call the original search function with the provider config
-            response: Final = await original_generic_function(
-                search_provider=search_provider,
-                api_key=api_key,
-                api_base=api_base,
-                **kwargs,
-            )
+            response: Final = await original_generic_function(**search_params)
 
             return response
 
