@@ -24,3 +24,10 @@ def test_get_all_llm_api_params_is_memoized():
     first = ModelParamHelper._get_all_llm_api_params()
     second = ModelParamHelper._get_all_llm_api_params()
     assert first is second
+
+
+def test_get_all_llm_api_params_cannot_be_mutated_by_a_caller():
+    supported_params = ModelParamHelper._get_all_llm_api_params()
+
+    assert isinstance(supported_params, frozenset)
+    assert "temperature" in ModelParamHelper._get_all_llm_api_params()

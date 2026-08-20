@@ -44,20 +44,17 @@ class ModelParamHelper:
         return set(["messages", "prompt", "input", "system"])
 
     @staticmethod
-    def _get_relevant_args_to_use_for_logging() -> set[str]:
+    def _get_relevant_args_to_use_for_logging() -> frozenset[str]:
         """
         Gets all relevant llm api params besides the ones with prompt content
         """
         all_openai_llm_api_params: Final = ModelParamHelper._get_all_llm_api_params()
         # Exclude parameters that contain prompt content
-        combined_kwargs: Final = all_openai_llm_api_params.difference(
-            set(ModelParamHelper.get_exclude_params_for_model_parameters())
-        )
-        return combined_kwargs
+        return all_openai_llm_api_params.difference(ModelParamHelper.get_exclude_params_for_model_parameters())
 
     @staticmethod
     @lru_cache(maxsize=1)
-    def _get_all_llm_api_params() -> set[str]:
+    def _get_all_llm_api_params() -> frozenset[str]:
         """
         Gets the supported kwargs for each call type and combines them.
 
@@ -77,16 +74,16 @@ class ModelParamHelper:
         anthropic_messages_kwargs: Final = ModelParamHelper._get_litellm_supported_anthropic_messages_kwargs()
         exclude_kwargs: Final = ModelParamHelper._get_exclude_kwargs()
 
-        combined_kwargs = chat_completion_kwargs.union(
-            text_completion_kwargs,
-            embedding_kwargs,
-            transcription_kwargs,
-            rerank_kwargs,
-            responses_api_kwargs,
-            anthropic_messages_kwargs,
+        return frozenset(
+            chat_completion_kwargs.union(
+                text_completion_kwargs,
+                embedding_kwargs,
+                transcription_kwargs,
+                rerank_kwargs,
+                responses_api_kwargs,
+                anthropic_messages_kwargs,
+            ).difference(exclude_kwargs)
         )
-        combined_kwargs = combined_kwargs.difference(exclude_kwargs)
-        return combined_kwargs
 
     @staticmethod
     def get_litellm_provider_specific_params_for_chat_params() -> set[str]:
