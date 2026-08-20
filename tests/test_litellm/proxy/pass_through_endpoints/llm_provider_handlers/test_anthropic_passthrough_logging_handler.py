@@ -2320,6 +2320,43 @@ class TestAnthropicResponseCostRecordedOnModelCallDetails:
         )
         assert logging_obj.model_call_details["response_cost"] > 0
 
+    @patch("litellm.completion_cost")
+    def test_upstream_reported_cost_is_preserved_for_non_streaming_response(self, mock_completion_cost):
+        import httpx
+
+        from litellm.proxy.pass_through_endpoints.upstream_usage_headers import apply_upstream_reported_usage
+        from litellm.types.utils import Choices, Message, ModelResponse, Usage
+
+        mock_completion_cost.return_value = 0.000075
+        logging_obj = MagicMock()
+        logging_obj.model_call_details = {}
+        logging_obj.get_router_model_id.return_value = None
+        logging_obj.litellm_params = {}
+        logging_obj.litellm_call_id = "test-call-id"
+        apply_upstream_reported_usage(
+            logging_obj=logging_obj,
+            headers=httpx.Headers({"x-litellm-response-cost": "0.777777", "x-litellm-total-tokens": "4242"}),
+        )
+        response = ModelResponse(
+            choices=[Choices(index=0, message=Message(role="assistant", content="pong"))],
+            model="gpt-4o",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+        kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+            litellm_model_response=response,
+            model="gpt-4o",
+            kwargs={},
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            logging_obj=logging_obj,
+        )
+
+        mock_completion_cost.assert_not_called()
+        assert kwargs["response_cost"] == 0.777777
+        assert logging_obj.model_call_details["response_cost"] == 0.777777
+        assert logging_obj.model_call_details["combined_usage_object"] == Usage(total_tokens=4242)
+
 
 class TestAnthropicPassthroughFastMode:
     """Anthropic charges a provider-specific multiplier for ``speed=fast``, and the

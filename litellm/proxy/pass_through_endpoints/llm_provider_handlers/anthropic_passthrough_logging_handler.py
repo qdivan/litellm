@@ -28,6 +28,7 @@ from litellm.proxy.pass_through_endpoints.llm_provider_handlers.batch_attributio
     optional_str,
     request_tags_from_metadata,
 )
+from litellm.proxy.pass_through_endpoints.upstream_usage_headers import has_upstream_reported_usage
 from litellm.types.passthrough_endpoints.pass_through_endpoints import (
     PassthroughStandardLoggingPayload,
 )
@@ -276,23 +277,28 @@ class AnthropicPassthroughLoggingHandler:
                 litellm_params=(logging_obj.litellm_params if hasattr(logging_obj, "litellm_params") else None)
             )
 
-            response_cost: Final = (
-                0.0
-                if logging_obj.model_call_details.get("cache_hit") is True
-                else litellm.completion_cost(
-                    completion_response=litellm_model_response,
-                    model=model_for_cost,
-                    custom_llm_provider=custom_llm_provider,
-                    custom_pricing=custom_pricing,
-                    router_model_id=router_model_id,
+            if has_upstream_reported_usage(logging_obj):
+                upstream_response_cost: Final = logging_obj.model_call_details.get("response_cost")
+                if upstream_response_cost is not None:
+                    kwargs["response_cost"] = upstream_response_cost
+            else:
+                response_cost: Final = (
+                    0.0
+                    if logging_obj.model_call_details.get("cache_hit") is True
+                    else litellm.completion_cost(
+                        completion_response=litellm_model_response,
+                        model=model_for_cost,
+                        custom_llm_provider=custom_llm_provider,
+                        custom_pricing=custom_pricing,
+                        router_model_id=router_model_id,
+                    )
                 )
-            )
+                kwargs["response_cost"] = response_cost
+                # the pass-through success path reads spend from
+                # model_call_details["response_cost"], not from kwargs
+                logging_obj.model_call_details["response_cost"] = response_cost
 
-            kwargs["response_cost"] = response_cost
             kwargs["model"] = model
-            # the pass-through success path reads spend from
-            # model_call_details["response_cost"], not from kwargs
-            logging_obj.model_call_details["response_cost"] = response_cost
             passthrough_logging_payload: Final[PassthroughStandardLoggingPayload | None] = kwargs.get(
                 "passthrough_logging_payload"
             )
