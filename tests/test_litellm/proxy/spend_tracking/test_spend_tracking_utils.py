@@ -3569,3 +3569,27 @@ def test_redact_logged_api_key_bearer_sha256_without_flag_is_hashed():
     assert result is not None
     assert result != already_hashed
     assert result == hash_token(already_hashed)
+
+
+@patch("litellm.proxy.proxy_server.master_key", None)
+@patch("litellm.proxy.proxy_server.general_settings", {})
+def test_get_logging_payload_uses_sagemaker_standard_logging_model_without_alias():
+    payload = get_logging_payload(
+        kwargs={
+            "model": "sagemaker/direct-endpoint",
+            "custom_llm_provider": "sagemaker",
+            "litellm_params": {"metadata": {"user_api_key": "test-key"}},
+            "standard_logging_object": {
+                "model": "sagemaker/meta-llama/Llama-3.1-8B-Instruct",
+                "metadata": {},
+                "model_map_information": StandardLoggingModelInformation(
+                    model_map_key="sagemaker/direct-endpoint", model_map_value=None
+                ),
+            },
+        },
+        response_obj={},
+        start_time=datetime.datetime.now(timezone.utc),
+        end_time=datetime.datetime.now(timezone.utc),
+    )
+
+    assert payload["model"] == "sagemaker/meta-llama/Llama-3.1-8B-Instruct"
