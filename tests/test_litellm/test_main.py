@@ -743,6 +743,28 @@ def test_responses_api_bridge_check_strips_responses_prefix():
         assert model_info["mode"] == "responses"
 
 
+@pytest.mark.parametrize(
+    ("model", "expected_mode"),
+    [
+        ("perplexity/nemotron-3-ultra-550b-a55b", "responses"),
+        ("perplexity/sonar", "responses"),
+        ("sonar", None),
+    ],
+)
+def test_responses_api_bridge_check_routes_perplexity_agent_model_without_cost_map(model, expected_mode):
+    """A doubled Perplexity prefix identifies an Agent API deployment without pricing metadata."""
+    from litellm.main import responses_api_bridge_check
+
+    with patch("litellm.main._get_model_info_helper", return_value={}):
+        model_info, routed_model = responses_api_bridge_check(
+            model=model,
+            custom_llm_provider="perplexity",
+        )
+
+    assert routed_model == model
+    assert model_info.get("mode") == expected_mode
+
+
 def test_responses_api_bridge_check_gpt_5_4_pro():
     """Test that gpt-5.4-pro routes through responses API bridge, not chat completions.
 

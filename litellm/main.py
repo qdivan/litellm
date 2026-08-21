@@ -1039,6 +1039,9 @@ def responses_api_bridge_check(
             mode = "responses"
             model_info["mode"] = mode
 
+    if custom_llm_provider == "perplexity" and model.startswith("perplexity/"):
+        model_info["mode"] = "responses"
+
     # OpenAI/Azure GPT-5 chat-completions that need Responses-only fields (e.g.
     # ``reasoningSummary`` in ``extra_body``) must be bridged; Chat Completions rejects
     # those keys.
