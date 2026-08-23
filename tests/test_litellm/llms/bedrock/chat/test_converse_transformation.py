@@ -260,6 +260,23 @@ def test_transform_tool_call_with_cache_control():
     assert transformed_cache_msg["cachePoint"]["type"] == "default"
 
 
+def test_tool_choice_any_maps_to_bedrock_forced_tool_choice():
+    config = AmazonConverseConfig()
+
+    required_tool_choice = config.map_tool_choice_values(
+        model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        tool_choice="required",
+        drop_params=False,
+    )
+    any_tool_choice = config.map_tool_choice_values(
+        model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        tool_choice="any",
+        drop_params=False,
+    )
+
+    assert any_tool_choice == required_tool_choice == {"any": {}}
+
+
 def test_reasoning_with_forced_tool_choice_switches_to_auto():
     config = AmazonConverseConfig()
 
