@@ -3,12 +3,14 @@ Unit tests for Prometheus user and team count metrics
 """
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from prometheus_client import REGISTRY
 
 from litellm.integrations.prometheus import PrometheusLogger
+from litellm.proxy._types import LiteLLM_TeamTable
 
 
 @pytest.fixture(autouse=True)
@@ -226,7 +228,6 @@ class TestPrometheusUserTeamCountMetrics:
 
     def test_metrics_have_correct_type(self, prometheus_logger):
         """Test that metrics are Gauge type (not Counter or Histogram)"""
-        from prometheus_client import Gauge
 
         # The metrics should be Gauge instances (or wrapped gauges)
         # We can test this by checking they have the set() method
@@ -333,27 +334,156 @@ async def test_assemble_team_object_uses_db_max_budget_when_metadata_is_none(
     assert team_object.budget_reset_at == datetime(2026, 3, 1, tzinfo=timezone.utc)
 
 
-async def test_assemble_team_object_uses_db_spend_when_metadata_is_none(
+def _remaining_team_budget(
+    prometheus_logger: PrometheusLogger,
+    team: LiteLLM_TeamTable,
+) -> float | None:
+    prometheus_logger._set_team_budget_metrics(team)
+    return REGISTRY.get_sample_value(
+        "litellm_remaining_team_budget_metric",
+        {"team": team.team_id, "team_alias": team.team_alias or ""},
+    )
+
+
+async def test_missing_cached_team_spend_uses_fetched_spend_for_remaining_budget(
     prometheus_logger,
 ):
-    db_team = MagicMock()
-    db_team.spend = 902.60
-    db_team.max_budget = 1000.0
-    db_team.budget_reset_at = None
+    fetched_team = SimpleNamespace(spend=902.60, max_budget=1000.0, budget_reset_at=None)
 
-    with patch(  # test-quality-ok: _assemble_team_object imports get_team_object internally
-        "litellm.proxy.auth.auth_checks.get_team_object"
-    ) as mock_get_team:
-        mock_get_team.return_value = db_team
-        team_object = await prometheus_logger._assemble_team_object(
+    with patch(
+        "litellm.proxy.auth.auth_checks.get_team_object",
+        AsyncMock(return_value=fetched_team),
+    ):
+        team = await prometheus_logger._assemble_team_object(
+            team_id="team-1",
+            team_alias="my-team",
+            spend=None,
+            max_budget=None,
+            response_cost=0.0,
+        )
+
+    assert _remaining_team_budget(prometheus_logger, team) == pytest.approx(97.40)
+
+
+async def test_explicit_cached_team_spend_takes_precedence_over_fetched_spend(
+    prometheus_logger,
+):
+    fetched_team = SimpleNamespace(spend=902.60, max_budget=1000.0, budget_reset_at=None)
+
+    with patch(
+        "litellm.proxy.auth.auth_checks.get_team_object",
+        AsyncMock(return_value=fetched_team),
+    ):
+        team = await prometheus_logger._assemble_team_object(
+            team_id="team-1",
+            team_alias="my-team",
+            spend=125.0,
+            max_budget=1000.0,
+            response_cost=0.0,
+        )
+
+    assert team.spend == 125.0
+    assert _remaining_team_budget(prometheus_logger, team) == 875.0
+
+
+async def test_explicit_zero_cached_team_spend_takes_precedence_over_fetched_spend(
+    prometheus_logger,
+):
+    fetched_team = SimpleNamespace(spend=902.60, max_budget=1000.0, budget_reset_at=None)
+
+    with patch(
+        "litellm.proxy.auth.auth_checks.get_team_object",
+        AsyncMock(return_value=fetched_team),
+    ):
+        team = await prometheus_logger._assemble_team_object(
+            team_id="team-1",
+            team_alias="my-team",
+            spend=0.0,
+            max_budget=1000.0,
+            response_cost=0.0,
+        )
+
+    assert team.spend == 0.0
+    assert _remaining_team_budget(prometheus_logger, team) == 1000.0
+
+
+async def test_missing_team_info_preserves_metadata_fallback_and_response_cost(
+    prometheus_logger,
+):
+    with patch(
+        "litellm.proxy.auth.auth_checks.get_team_object",
+        AsyncMock(return_value=None),
+    ):
+        team = await prometheus_logger._assemble_team_object(
             team_id="team-1",
             team_alias="my-team",
             spend=None,
             max_budget=1000.0,
-            response_cost=0.5,
+            response_cost=0.25,
         )
 
-    assert team_object.spend == pytest.approx(903.10)
+    assert team.spend == 0.25
+    assert _remaining_team_budget(prometheus_logger, team) == 999.75
+
+
+async def test_fetched_team_spend_includes_current_response_cost(
+    prometheus_logger,
+):
+    fetched_team = SimpleNamespace(spend=902.60, max_budget=1000.0, budget_reset_at=None)
+
+    with patch(
+        "litellm.proxy.auth.auth_checks.get_team_object",
+        AsyncMock(return_value=fetched_team),
+    ):
+        team = await prometheus_logger._assemble_team_object(
+            team_id="team-1",
+            team_alias="my-team",
+            spend=None,
+            max_budget=None,
+            response_cost=0.50,
+        )
+
+    assert team.spend == pytest.approx(903.10)
+    assert _remaining_team_budget(prometheus_logger, team) == pytest.approx(96.90)
+
+
+async def test_team_budget_cron_refresh_uses_authoritative_spend_on_repeated_scrapes(
+    prometheus_logger,
+):
+    first_team = LiteLLM_TeamTable(
+        team_id="team-1",
+        team_alias="my-team",
+        spend=902.60,
+        max_budget=1000.0,
+    )
+    refreshed_team = LiteLLM_TeamTable(
+        team_id="team-1",
+        team_alias="my-team",
+        spend=950.0,
+        max_budget=1000.0,
+    )
+    get_paginated_teams = AsyncMock(side_effect=[([first_team], 1), ([refreshed_team], 1)])
+
+    with (
+        patch("litellm.proxy.proxy_server.prisma_client", MagicMock()),
+        patch(
+            "litellm.proxy.management_endpoints.team_endpoints.get_paginated_teams",
+            get_paginated_teams,
+        ),
+    ):
+        await prometheus_logger._initialize_team_budget_metrics()
+        first_remaining = REGISTRY.get_sample_value(
+            "litellm_remaining_team_budget_metric",
+            {"team": "team-1", "team_alias": "my-team"},
+        )
+        await prometheus_logger._initialize_team_budget_metrics()
+
+    assert first_remaining == pytest.approx(97.40)
+    assert REGISTRY.get_sample_value(
+        "litellm_remaining_team_budget_metric",
+        {"team": "team-1", "team_alias": "my-team"},
+    ) == pytest.approx(50.0)
+    assert get_paginated_teams.await_count == 2
 
 
 async def test_assemble_team_object_does_not_override_metadata_max_budget(
@@ -961,8 +1091,9 @@ def test_default_latency_buckets(prometheus_logger):
 
 def test_custom_latency_buckets():
     """prometheus_latency_buckets in litellm settings overrides the defaults."""
-    import litellm
     from prometheus_client import REGISTRY
+
+    import litellm
 
     custom_buckets = [0.1, 0.5, 1.0, 5.0, 10.0]
     original = litellm.prometheus_latency_buckets
