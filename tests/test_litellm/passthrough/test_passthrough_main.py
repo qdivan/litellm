@@ -52,17 +52,97 @@ def test_llm_passthrough_route():
         assert response.json == {"message": "Hello, world!"}
 
 
-def test_bedrock_mantle_uses_bedrock_passthrough_config():
+def test_bedrock_mantle_invoke_uses_bedrock_passthrough_config_without_network():
+    from litellm.llms.bedrock.passthrough.transformation import (
+        BedrockPassthroughConfig,
+    )
+    from litellm.types.utils import LlmProviders
+    from litellm.utils import ProviderConfigManager
+
+    model = "anthropic.claude-fable-5"
+    endpoint = f"model/{model}/invoke"
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    signed_body = json.dumps(body, separators=(",", ":")).encode()
+    provider_config = ProviderConfigManager.get_provider_passthrough_config(
+        model=model,
+        provider=LlmProviders.BEDROCK_MANTLE,
+    )
+
+    assert isinstance(provider_config, BedrockPassthroughConfig)
+
+    client = HTTPHandler()
+    response = httpx.Response(
+        200, request=httpx.Request("POST", "https://example.invalid")
+    )
+    logging_obj = MagicMock()
+    with (
+        patch.object(provider_config, "validate_environment", return_value={}),
+        patch.object(
+            provider_config, "sign_request", return_value=({}, signed_body)
+        ) as sign_request,
+        patch.object(client.client, "send", return_value=response) as send,
+    ):
+        result = llm_passthrough_route(
+            method="POST",
+            endpoint=endpoint,
+            model=model,
+            custom_llm_provider="bedrock_mantle",
+            api_base="https://bedrock-runtime.us-east-1.amazonaws.com",
+            json=body,
+            client=client,
+            provider_config=provider_config,
+            litellm_logging_obj=logging_obj,
+            aws_region_name="us-east-1",
+        )
+
+    assert result is response
+    send.assert_called_once()
+    forwarded_request = send.call_args.kwargs["request"]
+    assert send.call_args.kwargs["stream"] is False
+    assert forwarded_request.method == "POST"
+    assert str(forwarded_request.url) == (
+        f"https://bedrock-runtime.us-east-1.amazonaws.com/{endpoint}"
+    )
+    assert forwarded_request.content == signed_body
+    sign_request.assert_called_once()
+    assert sign_request.call_args.kwargs["request_data"] == body
+    assert sign_request.call_args.kwargs["model"] == model
+    logging_obj.update_environment_variables.assert_called_once()
+    logging_call = logging_obj.update_environment_variables.call_args.kwargs
+    assert logging_call["custom_llm_provider"] == "bedrock_mantle"
+    assert logging_call["endpoint"] == endpoint
+
+
+def test_bedrock_passthrough_resolution_control():
+    from litellm.llms.bedrock.passthrough.transformation import (
+        BedrockPassthroughConfig,
+    )
     from litellm.types.utils import LlmProviders
     from litellm.utils import ProviderConfigManager
 
     provider_config = ProviderConfigManager.get_provider_passthrough_config(
         model="anthropic.claude-fable-5",
-        provider=LlmProviders.BEDROCK_MANTLE,
+        provider=LlmProviders.BEDROCK,
     )
 
-    assert provider_config is not None
-    assert provider_config.__class__.__name__ == "BedrockPassthroughConfig"
+    assert isinstance(provider_config, BedrockPassthroughConfig)
+
+
+def test_unsupported_passthrough_provider_still_raises_provider_not_found():
+    with pytest.raises(Exception, match="Provider openai not found"):
+        llm_passthrough_route(
+            method="POST",
+            endpoint="v1/chat/completions",
+            model="gpt-5",
+            custom_llm_provider="openai",
+            api_base="https://example.invalid",
+            json={"messages": [{"role": "user", "content": "hello"}]},
+            client=HTTPHandler(),
+            litellm_logging_obj=MagicMock(),
+        )
 
 
 def test_bedrock_application_inference_profile_url_encoding():
