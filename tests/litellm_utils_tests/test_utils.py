@@ -2341,6 +2341,7 @@ def test_get_valid_models_from_provider_cache_invalidation(monkeypatch):
     from litellm.utils import _model_cache
 
     monkeypatch.setenv("OPENAI_API_KEY", "123")
+    assert _model_cache.get_cached_model_info("openai") is None
 
     _model_cache.set_cached_model_info(
         "openai", litellm_params=None, available_models=["gpt-5-mini"]
@@ -2348,6 +2349,24 @@ def test_get_valid_models_from_provider_cache_invalidation(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY")
 
     assert _model_cache.get_cached_model_info("openai") is None
+
+
+def test_model_cache_invalidates_dynamic_params_when_provider_env_changes(monkeypatch):
+    from litellm.types.router import LiteLLM_Params
+    from litellm.utils import AvailableModelsCache
+
+    cache = AvailableModelsCache()
+    params = LiteLLM_Params(model="openai/gpt-5-mini")
+    monkeypatch.setenv("OPENAI_API_KEY", "first-key")
+    assert cache.get_cached_model_info("openai", params) is None
+
+    cache.set_cached_model_info("openai", params, ["gpt-5-mini"])
+    monkeypatch.setenv("OPENAI_API_KEY", "rotated-key")
+
+    assert cache.get_cached_model_info("openai", params) is None
+
+    cache.set_cached_model_info("openai", params, ["gpt-5.1"])
+    assert cache.get_cached_model_info("openai", params) == ["gpt-5.1"]
 
 
 def test_get_valid_models_from_dynamic_api_key():

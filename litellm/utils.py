@@ -7121,10 +7121,10 @@ class AvailableModelsCache(InMemoryCache):
     def _check_env_changed(self) -> bool:
         """Check if environment variables have changed"""
         current_hash: Final = self._get_env_hash()
-        if self._env_hash is None:
-            self._env_hash = current_hash
-            return True
-        return current_hash != self._env_hash
+        if current_hash == self._env_hash:
+            return False
+        self._env_hash = current_hash
+        return True
 
     def _get_cache_key(
         self,
@@ -7146,7 +7146,7 @@ class AvailableModelsCache(InMemoryCache):
     ) -> list[str] | None:
         """Get cached model info"""
         # Check if environment has changed
-        if litellm_params is None and self._check_env_changed():
+        if self._check_env_changed():
             self.cache_dict.clear()
             return None
 
