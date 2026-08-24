@@ -69,7 +69,14 @@ def _reconstruct_ui_where_from_sql(sql_query, params):
     ``LIMIT`` (bounded count query).
     """
     where: dict = {}
-    clause = re.search(r"WHERE (.*?)\s+(?:ORDER BY|LIMIT)", sql_query, re.DOTALL)
+    if "WITH ranked_matches" in sql_query:
+        clause = re.search(
+            r'FROM "LiteLLM_SpendLogs"\s+WHERE (.*?)\s+\)\s+SELECT',
+            sql_query,
+            re.DOTALL,
+        )
+    else:
+        clause = re.search(r"WHERE (.*?)\s+(?:GROUP BY|ORDER BY|LIMIT)", sql_query, re.DOTALL)
     if clause is None:
         return where
 
@@ -177,13 +184,20 @@ def make_ui_spend_logs_mock_prisma(mock_spend_logs, filter_fn, team_lookup_fn=No
             if "mcp_tool_call_count" in sql_query:
                 return []
             filtered = filter_fn(_reconstruct_ui_where_from_sql(sql_query, params))
-            total = len(filtered)
+            grouped = "PARTITION BY CASE WHEN session_id IS NULL" in sql_query or "GROUP BY CASE WHEN session_id IS NULL" in sql_query
+            session_rows = list(
+                {
+                    log.get("session_id") or log["request_id"]: log
+                    for log in filtered
+                }.values()
+            )
+            results = session_rows if grouped else filtered
             if "COUNT(*)" in sql_query:
                 cap_plus_one = params[-1]
-                return [{"total_count": min(total, cap_plus_one)}]
+                return [{"total_count": min(len(results), cap_plus_one)}]
             page_size = params[-2] if len(params) >= 2 else 50
             skip = params[-1] if len(params) >= 1 else 0
-            return [row for row in filtered[skip : skip + page_size]]
+            return [row for row in results[skip : skip + page_size]]
 
     class MockPrismaClient:
         def __init__(self):
@@ -613,17 +627,17 @@ async def test_ui_view_spend_logs_with_user_id(client, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "session_id_query,expected_request_ids",
+    "session_id_query,expected_session_ids",
     [
-        ("session-filter-demo-1", {"req1", "req2"}),
-        ("session-filter-demo-2", {"req3"}),
-        ("session-filter", {"req1", "req2", "req3"}),
-        ("demo", {"req1", "req2", "req3"}),
+        ("session-filter-demo-1", {"session-filter-demo-1"}),
+        ("session-filter-demo-2", {"session-filter-demo-2"}),
+        ("session-filter", {"session-filter-demo-1", "session-filter-demo-2"}),
+        ("demo", {"session-filter-demo-1", "session-filter-demo-2"}),
         ("no-such-session", set()),
     ],
 )
 async def test_ui_view_spend_logs_with_session_id(
-    client, monkeypatch, session_id_query, expected_request_ids
+    client, monkeypatch, session_id_query, expected_session_ids
 ):
     def make_log(request_id, session_id):
         return {
@@ -673,8 +687,8 @@ async def test_ui_view_spend_logs_with_session_id(
 
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == len(expected_request_ids)
-    assert {log["request_id"] for log in data["data"]} == expected_request_ids
+    assert data["total"] == len(expected_session_ids)
+    assert {log["session_id"] for log in data["data"]} == expected_session_ids
     assert all(session_id_query in log["session_id"] for log in data["data"])
 
 
@@ -1708,6 +1722,70 @@ async def test_ui_view_spend_logs_page_size_upper_bound(
             data = response.json()
             assert data["page_size"] == page_size
             assert len(data["data"]) == expected_rows
+    finally:
+        app.dependency_overrides.pop(ps.user_api_key_auth, None)
+
+
+@pytest.mark.asyncio
+async def test_ui_view_spend_logs_paginates_grouped_sessions(client, monkeypatch):
+    mock_spend_logs = [
+        {
+            "id": "log-a-1",
+            "request_id": "req-a-1",
+            "api_key": "sk-test-key",
+            "session_id": "session-a",
+            "startTime": "2026-08-24T01:00:00Z",
+        },
+        {
+            "id": "log-a-2",
+            "request_id": "req-a-2",
+            "api_key": "sk-test-key",
+            "session_id": "session-a",
+            "startTime": "2026-08-24T02:00:00Z",
+        },
+        {
+            "id": "log-a-3",
+            "request_id": "req-a-3",
+            "api_key": "sk-test-key",
+            "session_id": "session-a",
+            "startTime": "2026-08-24T03:00:00Z",
+        },
+        {
+            "id": "log-b",
+            "request_id": "req-b",
+            "api_key": "sk-test-key",
+            "session_id": "session-b",
+            "startTime": "2026-08-24T04:00:00Z",
+        },
+        {
+            "id": "log-c",
+            "request_id": "req-c",
+            "api_key": "sk-test-key",
+            "session_id": "session-c",
+            "startTime": "2026-08-24T05:00:00Z",
+        },
+    ]
+    monkeypatch.setattr(
+        "litellm.proxy.proxy_server.prisma_client",
+        make_ui_spend_logs_mock_prisma(mock_spend_logs, lambda where: mock_spend_logs),
+    )
+    app.dependency_overrides[ps.user_api_key_auth] = lambda: UserAPIKeyAuth(
+        user_role=LitellmUserRoles.PROXY_ADMIN, user_id="admin_user"
+    )
+
+    try:
+        start_date, end_date = _default_date_range()
+        response = client.get(
+            "/spend/logs/ui",
+            params={"page": 1, "page_size": 2, "start_date": start_date, "end_date": end_date},
+            headers={"Authorization": "Bearer sk-test"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 3
+        assert data["total_pages"] == 2
+        assert [row["session_id"] for row in data["data"]] == ["session-a", "session-b"]
     finally:
         app.dependency_overrides.pop(ps.user_api_key_auth, None)
 

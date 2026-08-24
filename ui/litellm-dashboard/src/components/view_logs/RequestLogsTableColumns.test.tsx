@@ -39,6 +39,18 @@ function renderRows(rows: LogEntry[], deps = noopDeps) {
   );
 }
 
+describe("Messages column", () => {
+  it("labels grouped-session counts as messages without a type tooltip", async () => {
+    const user = userEvent.setup();
+    renderRows([logEntry({ request_id: "req-session", session_id: "sess-1", session_total_count: 3 })]);
+
+    expect(screen.getByText("Messages")).toBeInTheDocument();
+    expect(screen.queryByText("Type")).not.toBeInTheDocument();
+    await user.hover(screen.getByText("3"));
+    expect(screen.queryByText("3 LLM")).not.toBeInTheDocument();
+  });
+});
+
 describe("Cost column", () => {
   it("renders '-' for zero spend with no tooltip, so hovering never shows a contradictory $0", async () => {
     const user = userEvent.setup();

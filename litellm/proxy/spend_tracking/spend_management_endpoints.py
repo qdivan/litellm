@@ -2586,12 +2586,14 @@ async def ui_view_spend_logs(
         else:
             _order_expr = order_column
 
+        session_group: Final = "CASE WHEN session_id IS NULL THEN 'request:' || request_id ELSE 'session:' || session_id END"
         count_query: Final = f"""
             SELECT COUNT(*) AS total_count
             FROM (
                 SELECT 1
                 FROM "LiteLLM_SpendLogs"
                 WHERE {" AND ".join(sql_conditions)}
+                {"" if is_v2 else f"GROUP BY {session_group}"}
                 LIMIT ${p}
             ) AS bounded_matches
         """
@@ -2602,21 +2604,44 @@ async def ui_view_spend_logs(
         total_is_capped: Final = raw_total > SPEND_LOGS_PAGINATION_COUNT_CAP
         total_records: Final = SPEND_LOGS_PAGINATION_COUNT_CAP if total_is_capped else raw_total
 
-        sql_query: Final = f"""
-            SELECT
-                request_id, call_type, api_key, spend, total_tokens,
-                prompt_tokens, completion_tokens, "startTime", "endTime",
-                "completionStartTime", model, model_id, model_group,
-                custom_llm_provider, api_base, "user", metadata,
-                cache_hit, cache_key, request_tags, team_id,
-                organization_id, end_user, requester_ip_address,
-                session_id, status, mcp_namespaced_tool_name, agent_id,
-                COALESCE(request_duration_ms, (EXTRACT(EPOCH FROM ("endTime" - "startTime")) * 1000)::INTEGER) AS request_duration_ms
-            FROM "LiteLLM_SpendLogs"
-            WHERE {" AND ".join(sql_conditions)}
-            ORDER BY {_order_expr} {_sql_dir}{_nulls_clause}
-            LIMIT ${p} OFFSET ${p + 1}
+        log_columns: Final = """
+            request_id, call_type, api_key, spend, total_tokens,
+            prompt_tokens, completion_tokens, "startTime", "endTime",
+            "completionStartTime", model, model_id, model_group,
+            custom_llm_provider, api_base, "user", metadata,
+            cache_hit, cache_key, request_tags, team_id,
+            organization_id, end_user, requester_ip_address,
+            session_id, status, mcp_namespaced_tool_name, agent_id,
+            COALESCE(request_duration_ms, (EXTRACT(EPOCH FROM ("endTime" - "startTime")) * 1000)::INTEGER) AS request_duration_ms
         """
+        if is_v2:
+            sql_query: Final = f"""
+                SELECT {log_columns}
+                FROM "LiteLLM_SpendLogs"
+                WHERE {" AND ".join(sql_conditions)}
+                ORDER BY {_order_expr} {_sql_dir}{_nulls_clause}
+                LIMIT ${p} OFFSET ${p + 1}
+            """
+        else:
+            sql_query = f"""
+                WITH ranked_matches AS (
+                    SELECT
+                        {log_columns},
+                        ROW_NUMBER() OVER (
+                            PARTITION BY {session_group}
+                            ORDER BY
+                                CASE WHEN call_type IN ('call_mcp_tool', 'list_mcp_tools') THEN 1 ELSE 0 END,
+                                {_order_expr} {_sql_dir}{_nulls_clause}
+                        ) AS session_row_number
+                    FROM "LiteLLM_SpendLogs"
+                    WHERE {" AND ".join(sql_conditions)}
+                )
+                SELECT {log_columns}
+                FROM ranked_matches
+                WHERE session_row_number = 1
+                ORDER BY {_order_expr} {_sql_dir}{_nulls_clause}
+                LIMIT ${p} OFFSET ${p + 1}
+            """
         sql_params.extend([page_size, skip])
 
         data: Final = await prisma_client.db.query_raw(sql_query, *sql_params)
