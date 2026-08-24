@@ -333,6 +333,29 @@ async def test_assemble_team_object_uses_db_max_budget_when_metadata_is_none(
     assert team_object.budget_reset_at == datetime(2026, 3, 1, tzinfo=timezone.utc)
 
 
+async def test_assemble_team_object_uses_db_spend_when_metadata_is_none(
+    prometheus_logger,
+):
+    db_team = MagicMock()
+    db_team.spend = 902.60
+    db_team.max_budget = 1000.0
+    db_team.budget_reset_at = None
+
+    with patch(  # test-quality-ok: _assemble_team_object imports get_team_object internally
+        "litellm.proxy.auth.auth_checks.get_team_object"
+    ) as mock_get_team:
+        mock_get_team.return_value = db_team
+        team_object = await prometheus_logger._assemble_team_object(
+            team_id="team-1",
+            team_alias="my-team",
+            spend=None,
+            max_budget=1000.0,
+            response_cost=0.5,
+        )
+
+    assert team_object.spend == pytest.approx(903.10)
+
+
 async def test_assemble_team_object_does_not_override_metadata_max_budget(
     prometheus_logger,
 ):
