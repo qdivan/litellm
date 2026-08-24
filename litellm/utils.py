@@ -8618,7 +8618,7 @@ class ProviderConfigManager:
         model: str,
         provider: LlmProviders,
     ) -> BasePassthroughConfig | None:
-        if LlmProviders.BEDROCK == provider:
+        if provider in (LlmProviders.BEDROCK, LlmProviders.BEDROCK_MANTLE):
             from litellm.llms.bedrock.passthrough.transformation import (
                 BedrockPassthroughConfig,
             )

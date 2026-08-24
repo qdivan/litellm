@@ -52,6 +52,19 @@ def test_llm_passthrough_route():
         assert response.json == {"message": "Hello, world!"}
 
 
+def test_bedrock_mantle_uses_bedrock_passthrough_config():
+    from litellm.types.utils import LlmProviders
+    from litellm.utils import ProviderConfigManager
+
+    provider_config = ProviderConfigManager.get_provider_passthrough_config(
+        model="anthropic.claude-fable-5",
+        provider=LlmProviders.BEDROCK_MANTLE,
+    )
+
+    assert provider_config is not None
+    assert provider_config.__class__.__name__ == "BedrockPassthroughConfig"
+
+
 def test_bedrock_application_inference_profile_url_encoding():
     client = HTTPHandler()
 
