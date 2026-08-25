@@ -2591,7 +2591,9 @@ async def ui_view_spend_logs(
         else:
             _order_expr = order_column
 
-        count_selection: Final = "SELECT DISTINCT COALESCE(session_id, request_id)" if is_grouped_by_session else "SELECT 1"
+        count_selection: Final = (
+            "SELECT DISTINCT COALESCE(session_id, request_id)" if is_grouped_by_session else "SELECT 1"
+        )
         count_query: Final = f"""
             SELECT COUNT(*) AS total_count
             FROM (
