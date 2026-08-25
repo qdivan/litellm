@@ -1469,7 +1469,10 @@ def convert_to_gemini_tool_call_result(
         if content_str.strip().startswith("{") or content_str.strip().startswith("["):
             # Try to parse as JSON (for Computer Use structured responses)
             parsed: Final = json.loads(content_str)
-            if isinstance(parsed, dict):
+            contains_schema_reference: Final = isinstance(parsed, dict) and (
+                '"$defs":' in json.dumps(parsed) or '"$ref":' in json.dumps(parsed)
+            )
+            if isinstance(parsed, dict) and not contains_schema_reference:
                 response_data = parsed  # Use the parsed JSON directly
             else:
                 response_data = {"content": content_str}

@@ -1723,6 +1723,28 @@ def test_convert_tool_response_with_url_image():
         pytest.skip(f"Failed to download image from URL: {e}")
 
 
+def test_convert_tool_response_with_json_schema_references_is_text():
+    """Schema references in tool output must not become Gemini part references."""
+    content = '{"$defs":{"human_scalar":{"type":"string"}},"properties":{"value":{"$ref":"#/$defs/human_scalar"}}}'
+    tool_message = {
+        "role": "tool",
+        "tool_call_id": "call_schema",
+        "content": content,
+    }
+    last_message_with_tool_calls = {
+        "tool_calls": [
+            {
+                "id": "call_schema",
+                "function": {"name": "inspect_schema", "arguments": "{}"},
+            }
+        ]
+    }
+
+    result = convert_to_gemini_tool_call_result(tool_message, last_message_with_tool_calls)
+
+    assert result["function_response"]["response"] == {"content": content}
+
+
 def test_convert_tool_response_text_only():
     """Test tool response with only text (no image)."""
     tool_message = {
