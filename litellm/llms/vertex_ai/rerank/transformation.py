@@ -20,6 +20,7 @@ from litellm.secret_managers.main import get_secret_str
 from litellm.types.rerank import (
     RerankBilledUnits,
     RerankResponse,
+    RerankResponseDocument,
     RerankResponseMeta,
     RerankResponseResult,
 )
@@ -185,6 +186,7 @@ class VertexAIRerankConfig(BaseRerankConfig, VertexBase):
                     {
                         "index": int(record["id"]),
                         "relevance_score": record.get("score", 0.0),
+                        "content": record.get("content"),
                     }
                 )
             else:
@@ -200,13 +202,13 @@ class VertexAIRerankConfig(BaseRerankConfig, VertexBase):
         # Sort by relevance score (descending)
         results.sort(key=lambda x: x["relevance_score"], reverse=True)
 
-        # Create response in Cohere format
-        # Convert results to proper RerankResponseResult objects
+        should_return_documents: Final = not request_data.get("ignoreRecordDetailsInResponse", True)
         rerank_results: Final = []
         for result in results:
-            rerank_results.append(
-                RerankResponseResult(index=result["index"], relevance_score=result["relevance_score"])
-            )
+            rerank_result = RerankResponseResult(index=result["index"], relevance_score=result["relevance_score"])
+            if should_return_documents and isinstance(content := result.get("content"), str):
+                rerank_result["document"] = RerankResponseDocument(text=content)
+            rerank_results.append(rerank_result)
 
         # Create meta object
         meta: Final = RerankResponseMeta(billed_units=RerankBilledUnits(search_units=len(records)))

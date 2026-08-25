@@ -300,6 +300,40 @@ class TestVertexAIRerankTransform:
         # Verify metadata
         assert result.meta["billed_units"]["search_units"] == 2
 
+    def test_transform_rerank_response_includes_document_text_when_requested(self):
+        response_data = {
+            "records": [
+                {"id": "1", "score": 0.98, "content": "ranked passage"},
+                {"id": "0", "score": 0.64, "content": "other passage"},
+            ]
+        }
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.json.return_value = response_data
+        result = self.config.transform_rerank_response(
+            model=self.model,
+            raw_response=mock_response,
+            model_response=RerankResponse(),
+            logging_obj=MagicMock(),
+            request_data={"ignoreRecordDetailsInResponse": False},
+        )
+
+        assert result.results[0]["document"] == {"text": "ranked passage"}
+        assert result.results[1]["document"] == {"text": "other passage"}
+
+    def test_transform_rerank_response_omits_document_text_when_not_requested(self):
+        response_data = {"records": [{"id": "1", "score": 0.98, "content": "ranked passage"}]}
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.json.return_value = response_data
+        result = self.config.transform_rerank_response(
+            model=self.model,
+            raw_response=mock_response,
+            model_response=RerankResponse(),
+            logging_obj=MagicMock(),
+            request_data={"ignoreRecordDetailsInResponse": True},
+        )
+
+        assert "document" not in result.results[0]
+
     def test_transform_rerank_response_with_ignore_record_details(self):
         """Test response transformation when ignoreRecordDetailsInResponse=true."""
         # Mock response with only IDs (when ignoreRecordDetailsInResponse=true)
