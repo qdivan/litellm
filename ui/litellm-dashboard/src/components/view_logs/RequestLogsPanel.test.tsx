@@ -139,6 +139,24 @@ describe("RequestLogsPanel", () => {
   });
 
   describe("multi-call session collapsing", () => {
+    it("requests session rows so pagination totals match the visible rows", async () => {
+      vi.mocked(uiSpendLogsCall).mockResolvedValue({
+        data: [
+          logEntry({ request_id: "session-a", session_id: "session-a", session_total_count: 20 }),
+          logEntry({ request_id: "session-b", session_id: "session-b", session_total_count: 20 }),
+        ],
+        total: 2,
+        page: 1,
+        page_size: 25,
+        total_pages: 1,
+      });
+      renderPanel();
+
+      await waitFor(() => expect(row("session-a")).not.toBeNull());
+      expect(row("session-b")).not.toBeNull();
+      expect(lastCall()?.params?.group_by_session).toBe(true);
+    });
+
     const sessionRows = [
       logEntry({ request_id: "req-mcp", call_type: "call_mcp_tool", session_id: "sess-1", session_total_count: 3 }),
       logEntry({ request_id: "req-llm", call_type: "acompletion", session_id: "sess-1", session_total_count: 3 }),

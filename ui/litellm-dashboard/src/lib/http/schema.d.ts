@@ -53140,6 +53140,8 @@ export interface operations {
                 request_id?: string | null;
                 /** @description Filter spend logs by session_id (partial string match) */
                 session_id?: string | null;
+                /** @description Return one representative row per session for dashboard pagination */
+                group_by_session?: boolean;
                 /** @description Filter spend logs by team_id */
                 team_id?: string | null;
                 /** @description Filter logs with spend greater than or equal to this value */
@@ -53248,6 +53250,8 @@ export interface operations {
                 request_id?: string | null;
                 /** @description Filter spend logs by session_id (partial string match) */
                 session_id?: string | null;
+                /** @description Return one representative row per session for dashboard pagination */
+                group_by_session?: boolean;
                 /** @description Filter spend logs by team_id */
                 team_id?: string | null;
                 /** @description Filter logs with spend greater than or equal to this value */

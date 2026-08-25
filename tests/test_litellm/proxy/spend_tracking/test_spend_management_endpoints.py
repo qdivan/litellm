@@ -74,7 +74,7 @@ def _reconstruct_ui_where_from_sql(sql_query, params):
     ``LIMIT`` (bounded count query).
     """
     where: dict = {}
-    clause = re.search(r"WHERE (.*?)\s+(?:ORDER BY|LIMIT)", sql_query, re.DOTALL)
+    clause = re.search(r"WHERE (.*?)\s+(?:GROUP BY|ORDER BY|LIMIT)", sql_query, re.DOTALL)
     if clause is None:
         return where
 
@@ -182,13 +182,21 @@ def make_ui_spend_logs_mock_prisma(mock_spend_logs, filter_fn, team_lookup_fn=No
             if "mcp_tool_call_count" in sql_query:
                 return []
             filtered = filter_fn(_reconstruct_ui_where_from_sql(sql_query, params))
-            total = len(filtered)
+            is_grouped_by_session = "SELECT DISTINCT COALESCE(session_id, request_id)" in sql_query
+            grouped_rows = list(
+                {
+                    log.get("session_id") or log["request_id"]: log
+                    for log in filtered
+                }.values()
+            )
+            total = len(grouped_rows) if is_grouped_by_session else len(filtered)
             if "COUNT(*)" in sql_query:
                 cap_plus_one = params[-1]
                 return [{"total_count": min(total, cap_plus_one)}]
             page_size = params[-2] if len(params) >= 2 else 50
             skip = params[-1] if len(params) >= 1 else 0
-            return [row for row in filtered[skip : skip + page_size]]
+            page_rows = grouped_rows if "WITH session_rows AS" in sql_query else filtered
+            return [row for row in page_rows[skip : skip + page_size]]
 
     class MockPrismaClient:
         def __init__(self):
@@ -1366,7 +1374,9 @@ async def test_ui_view_spend_logs_explicit_user_filter_cannot_escape_own_scope(c
 
         assert response.status_code == 200
         assert response.json()["data"] == []
-        page_sql, page_params = next((sql, params) for sql, params in observed_queries if "SELECT\n" in sql)
+        page_sql, page_params = next(
+            (sql, params) for sql, params in observed_queries if "LIMIT $" in sql and "OFFSET $" in sql
+        )
         assert page_sql.count('"user" = $') == 2
         assert page_params[2:4] == ("someone-else@example.com", "caller@example.com")
     finally:
@@ -1659,6 +1669,52 @@ async def test_ui_view_spend_logs_pagination(client, monkeypatch):
         assert data["total"] == 25
         assert len(data["data"]) == 10
         assert data["page"] == 2
+    finally:
+        app.dependency_overrides.pop(ps.user_api_key_auth, None)
+
+
+@pytest.mark.asyncio
+async def test_ui_view_spend_logs_group_by_session_paginates_session_rows(client, monkeypatch):
+    mock_spend_logs = [
+        {
+            "id": f"log-{session}-{message_index}",
+            "request_id": f"{session}-{message_index}",
+            "session_id": session,
+            "api_key": "sk-test-key",
+            "startTime": datetime.datetime.now(timezone.utc).isoformat(),
+            "model": "gpt-4",
+        }
+        for session in ("session-a", "session-b")
+        for message_index in range(20)
+    ]
+
+    monkeypatch.setattr(
+        "litellm.proxy.proxy_server.prisma_client",
+        make_ui_spend_logs_mock_prisma(mock_spend_logs, lambda where: mock_spend_logs),
+    )
+    app.dependency_overrides[ps.user_api_key_auth] = lambda: UserAPIKeyAuth(
+        user_role=LitellmUserRoles.PROXY_ADMIN, user_id="admin_user"
+    )
+
+    try:
+        start_date, end_date = _default_date_range()
+        response = client.get(
+            "/spend/logs/ui",
+            params={
+                "page": 1,
+                "page_size": 25,
+                "group_by_session": True,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            headers={"Authorization": "Bearer sk-test"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert data["total_pages"] == 1
+        assert [row["session_id"] for row in data["data"]] == ["session-a", "session-b"]
     finally:
         app.dependency_overrides.pop(ps.user_api_key_auth, None)
 
