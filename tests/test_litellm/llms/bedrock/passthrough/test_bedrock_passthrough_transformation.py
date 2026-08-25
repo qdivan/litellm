@@ -1,7 +1,17 @@
 from unittest.mock import patch
 
-
 from litellm.llms.bedrock.passthrough.transformation import BedrockPassthroughConfig
+from litellm.types.utils import LlmProviders
+from litellm.utils import ProviderConfigManager
+
+
+def test_bedrock_mantle_uses_bedrock_passthrough_config():
+    config = ProviderConfigManager.get_provider_passthrough_config(
+        model="anthropic.claude-fable-5",
+        provider=LlmProviders.BEDROCK_MANTLE,
+    )
+
+    assert isinstance(config, BedrockPassthroughConfig)
 
 
 def test_bedrock_passthrough_get_complete_url_default_endpoint():
