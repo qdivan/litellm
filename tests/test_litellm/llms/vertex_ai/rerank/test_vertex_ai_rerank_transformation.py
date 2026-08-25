@@ -3,13 +3,15 @@ Tests for Vertex AI rerank transformation functionality.
 Based on the test patterns from other rerank providers and the current Vertex AI implementation.
 """
 
+import asyncio
 import json
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+import litellm
 from litellm.llms.vertex_ai.rerank.transformation import VertexAIRerankConfig
 from litellm.types.rerank import RerankResponse
 
@@ -303,8 +305,8 @@ class TestVertexAIRerankTransform:
     def test_transform_rerank_response_includes_document_text_when_requested(self):
         response_data = {
             "records": [
-                {"id": "1", "score": 0.98, "content": "ranked passage"},
                 {"id": "0", "score": 0.64, "content": "other passage"},
+                {"id": "1", "score": 0.98, "content": "ranked passage"},
             ]
         }
         mock_response = MagicMock(spec=httpx.Response)
@@ -317,10 +319,27 @@ class TestVertexAIRerankTransform:
             request_data={"ignoreRecordDetailsInResponse": False},
         )
 
-        assert result.results[0]["document"] == {"text": "ranked passage"}
-        assert result.results[1]["document"] == {"text": "other passage"}
+        assert result.results == [
+            {
+                "index": 1,
+                "relevance_score": 0.98,
+                "document": {"text": "ranked passage"},
+            },
+            {
+                "index": 0,
+                "relevance_score": 0.64,
+                "document": {"text": "other passage"},
+            },
+        ]
 
-    def test_transform_rerank_response_omits_document_text_when_not_requested(self):
+    @pytest.mark.parametrize(
+        "request_data",
+        [{"ignoreRecordDetailsInResponse": True}, {}],
+        ids=["return_documents_false", "request_flag_omitted"],
+    )
+    def test_transform_rerank_response_omits_document_text_when_not_requested(
+        self, request_data: dict[str, bool]
+    ):
         response_data = {"records": [{"id": "1", "score": 0.98, "content": "ranked passage"}]}
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.json.return_value = response_data
@@ -329,10 +348,81 @@ class TestVertexAIRerankTransform:
             raw_response=mock_response,
             model_response=RerankResponse(),
             logging_obj=MagicMock(),
-            request_data={"ignoreRecordDetailsInResponse": True},
+            request_data=request_data,
         )
 
         assert "document" not in result.results[0]
+
+    def test_transform_rerank_response_does_not_invent_missing_document_text(self):
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.json.return_value = {"records": [{"id": "2", "score": 0.75}]}
+
+        result = self.config.transform_rerank_response(
+            model=self.model,
+            raw_response=mock_response,
+            model_response=RerankResponse(),
+            logging_obj=MagicMock(),
+            request_data={"ignoreRecordDetailsInResponse": False},
+        )
+
+        assert result.results == [{"index": 2, "relevance_score": 0.75}]
+
+    @pytest.mark.parametrize("sync_mode", [True, False], ids=["sync", "async"])
+    def test_return_documents_uses_vertex_transformer_in_sync_and_async_paths(
+        self, sync_mode: bool
+    ):
+        response_data = {
+            "records": [{"id": "1", "score": 0.98, "content": "ranked passage"}]
+        }
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = response_data
+
+        with patch.object(
+            VertexAIRerankConfig,
+            "_ensure_access_token",
+            return_value=("test-access-token", "test-project"),
+        ):
+            if sync_mode:
+                with patch(
+                    "litellm.llms.custom_httpx.http_handler.HTTPHandler.post",
+                    return_value=mock_response,
+                ) as mock_post:
+                    result = litellm.rerank(
+                        model=f"vertex_ai/{self.model}",
+                        query="test query",
+                        documents=["other passage", "ranked passage"],
+                        return_documents=True,
+                        vertex_project="test-project",
+                    )
+            else:
+                async_response = AsyncMock()
+                async_response.status_code = 200
+                async_response.headers = {"content-type": "application/json"}
+                async_response.json = MagicMock(return_value=response_data)
+                with patch(
+                    "litellm.llms.custom_httpx.http_handler.AsyncHTTPHandler.post",
+                    return_value=async_response,
+                ) as mock_post:
+                    result = asyncio.run(
+                        litellm.arerank(
+                            model=f"vertex_ai/{self.model}",
+                            query="test query",
+                            documents=["other passage", "ranked passage"],
+                            return_documents=True,
+                            vertex_project="test-project",
+                        )
+                    )
+
+        mock_post.assert_called_once()
+        assert result.results == [
+            {
+                "index": 1,
+                "relevance_score": 0.98,
+                "document": {"text": "ranked passage"},
+            }
+        ]
 
     def test_transform_rerank_response_with_ignore_record_details(self):
         """Test response transformation when ignoreRecordDetailsInResponse=true."""
