@@ -184,6 +184,23 @@ class TestOpenAIChatCompletionStreamingHandler:
         assert result.usage.completion_tokens == 350
         assert result.usage.total_tokens == 14147
 
+    def test_chunk_parser_preserves_non_null_service_tier(self):
+        handler = OpenAIChatCompletionStreamingHandler(
+            streaming_response=None, sync_stream=True
+        )
+
+        result = handler.chunk_parser(
+            {
+                "id": "chatcmpl-priority",
+                "created": 1234567890,
+                "model": "gpt-4o-mini",
+                "choices": [],
+                "service_tier": "priority",
+            }
+        )
+
+        assert result.service_tier == "priority"
+
     def test_chunk_parser_raises_on_in_body_error_payload(self):
         """vLLM/sglang return HTTP 200 streams whose body carries the error,
         e.g. data: {"error": {..., "code": 400}}. chunk_parser must surface it
