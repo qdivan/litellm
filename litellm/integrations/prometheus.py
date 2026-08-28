@@ -3374,16 +3374,13 @@ class PrometheusLogger(CustomLogger):
 
             total_pages: Final = (total_count + page_size - 1) // page_size
 
-            async def fetch_remaining_pages(current_page: int) -> tuple[_BudgetRowT, ...]:
-                if current_page > total_pages:
-                    return ()
-                page_data, _ = await data_fetch_function(page_size=page_size, page=current_page)
-                await set_metrics_function(page_data)
-                return (*page_data, *(await fetch_remaining_pages(current_page + 1)))
-
             await set_metrics_function(first_page_data)
-            all_data: Final = (*first_page_data, *(await fetch_remaining_pages(2)))
-            self._cleanup_stale_budget_metric_series(data_type=data_type, data=all_data)
+            all_data: list[_BudgetRowT] = [*first_page_data]
+            for page in range(2, total_pages + 1):
+                page_data, _ = await data_fetch_function(page_size=page_size, page=page)
+                await set_metrics_function(page_data)
+                all_data.extend(page_data)
+            self._cleanup_stale_budget_metric_series(data_type=data_type, data=tuple(all_data))
 
         except Exception as e:
             verbose_logger.exception("Error initializing %s budget metrics: %s", data_type, e)

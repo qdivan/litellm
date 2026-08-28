@@ -1922,6 +1922,25 @@ async def test_initialize_budget_metrics_removes_deleted_team_and_key_series(pro
     assert ("current-key", "current-alias") in prometheus_logger.litellm_remaining_api_key_budget_metric._metrics
 
 
+@pytest.mark.asyncio
+async def test_initialize_budget_metrics_paginates_without_recursion(prometheus_logger):
+    proxy_server_module = ModuleType("litellm.proxy.proxy_server")
+    setattr(proxy_server_module, "prisma_client", MagicMock())
+    page_calls: list[int] = []
+    total_pages = sys.getrecursionlimit() + 1
+
+    async def fetch_team_page(page_size: int, page: int):
+        page_calls.append(page)
+        return [], total_pages * page_size
+
+    with patch.dict(sys.modules, {"litellm.proxy.proxy_server": proxy_server_module}):
+        await prometheus_logger._initialize_budget_metrics(
+            fetch_team_page, prometheus_logger._set_team_list_budget_metrics, "teams"
+        )
+
+    assert page_calls == list(range(1, total_pages + 1))
+
+
 def test_set_team_budget_metrics_multiple_teams(prometheus_logger):
     """
     Test that _set_team_budget_metrics correctly handles multiple teams with different budgets and reset times
