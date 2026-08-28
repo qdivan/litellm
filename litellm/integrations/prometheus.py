@@ -203,6 +203,7 @@ class PrometheusLogger(CustomLogger):
             _custom_buckets: Final = litellm.prometheus_latency_buckets
             self.latency_buckets = tuple(_custom_buckets) if _custom_buckets is not None else LATENCY_BUCKETS
             self._bounded_prometheus_series_tracker = BoundedPrometheusSeriesTracker()
+            self._budget_metric_label_values: dict[str, dict[str, frozenset[tuple[str | None, ...]]]] = {}
 
             # Create metric factory functions
             self._counter_factory = self._create_metric_factory(Counter)
@@ -3366,24 +3367,126 @@ class PrometheusLogger(CustomLogger):
         try:
             page = 1
             page_size: Final = 50
-            data, total_count = await data_fetch_function(page_size=page_size, page=page)
+            first_page_data, total_count = await data_fetch_function(page_size=page_size, page=page)
 
             if total_count is None:
-                total_count = len(data)
+                total_count = len(first_page_data)
 
-            # Calculate total pages needed
             total_pages: Final = (total_count + page_size - 1) // page_size
 
-            # Set metrics for first page of data
-            await set_metrics_function(data)
+            async def fetch_remaining_pages(current_page: int) -> tuple[_BudgetRowT, ...]:
+                if current_page > total_pages:
+                    return ()
+                page_data, _ = await data_fetch_function(page_size=page_size, page=current_page)
+                await set_metrics_function(page_data)
+                return (*page_data, *(await fetch_remaining_pages(current_page + 1)))
 
-            # Get and set metrics for remaining pages
-            for page in range(2, total_pages + 1):
-                data, _ = await data_fetch_function(page_size=page_size, page=page)
-                await set_metrics_function(data)
+            await set_metrics_function(first_page_data)
+            all_data: Final = (*first_page_data, *(await fetch_remaining_pages(2)))
+            self._cleanup_stale_budget_metric_series(data_type=data_type, data=all_data)
 
         except Exception as e:
             verbose_logger.exception("Error initializing %s budget metrics: %s", data_type, e)
+
+    def _cleanup_stale_budget_metric_series(
+        self,
+        data_type: Literal["teams", "keys", "users", "orgs"],
+        data: tuple[_BudgetRowT, ...],
+    ) -> None:
+        if data_type == "teams":
+            current_series = self._team_budget_metric_label_values(cast(tuple[LiteLLM_TeamTable, ...], data))
+        elif data_type == "keys":
+            current_series = self._key_budget_metric_label_values(
+                cast(tuple[str | UserAPIKeyAuth | LiteLLM_DeletedVerificationToken, ...], data)
+            )
+        else:
+            return
+
+        previous_series: Final = self._budget_metric_label_values.get(data_type, {})
+        metric_names: Final = frozenset(previous_series) | frozenset(current_series)
+        self._budget_metric_label_values[data_type] = {
+            metric_name: current_series.get(metric_name, frozenset())
+            | frozenset(
+                label_values
+                for label_values in previous_series.get(metric_name, frozenset())
+                - current_series.get(metric_name, frozenset())
+                if not self._remove_stale_budget_metric_series(metric_name, label_values)
+            )
+            for metric_name in metric_names
+        }
+
+    def _remove_stale_budget_metric_series(self, metric_name: str, label_values: tuple[str | None, ...]) -> bool:
+        metric: Final = getattr(self, metric_name)
+        if isinstance(metric, NoOpMetric):
+            return True
+        try:
+            metric.remove(*label_values)
+            return True
+        except KeyError:
+            return True
+        except (AttributeError, ValueError):
+            return False
+
+    def _team_budget_metric_label_values(
+        self, teams: tuple[LiteLLM_TeamTable, ...]
+    ) -> dict[str, frozenset[tuple[str | None, ...]]]:
+        return {
+            "litellm_remaining_team_budget_metric": self._budget_metric_label_values_for_teams(
+                "litellm_remaining_team_budget_metric", teams
+            ),
+            "litellm_team_max_budget_metric": self._budget_metric_label_values_for_teams(
+                "litellm_team_max_budget_metric", tuple(team for team in teams if team.max_budget is not None)
+            ),
+            "litellm_team_budget_remaining_hours_metric": self._budget_metric_label_values_for_teams(
+                "litellm_team_budget_remaining_hours_metric",
+                tuple(team for team in teams if team.budget_reset_at is not None),
+            ),
+        }
+
+    def _budget_metric_label_values_for_teams(
+        self, metric_name: DEFINED_PROMETHEUS_METRICS, teams: tuple[LiteLLM_TeamTable, ...]
+    ) -> frozenset[tuple[str | None, ...]]:
+        return frozenset(
+            self._budget_metric_label_values_for_enum_values(
+                metric_name, UserAPIKeyLabelValues(team=team.team_id, team_alias=team.team_alias or "")
+            )
+            for team in teams
+        )
+
+    def _key_budget_metric_label_values(
+        self, keys: tuple[str | UserAPIKeyAuth | LiteLLM_DeletedVerificationToken, ...]
+    ) -> dict[str, frozenset[tuple[str | None, ...]]]:
+        valid_keys: Final = tuple(key for key in keys if isinstance(key, UserAPIKeyAuth))
+        return {
+            "litellm_remaining_api_key_budget_metric": self._budget_metric_label_values_for_keys(
+                "litellm_remaining_api_key_budget_metric", valid_keys
+            ),
+            "litellm_api_key_max_budget_metric": self._budget_metric_label_values_for_keys(
+                "litellm_api_key_max_budget_metric", tuple(key for key in valid_keys if key.max_budget is not None)
+            ),
+            "litellm_api_key_budget_remaining_hours_metric": self._budget_metric_label_values_for_keys(
+                "litellm_api_key_budget_remaining_hours_metric",
+                tuple(key for key in valid_keys if key.budget_reset_at is not None),
+            ),
+        }
+
+    def _budget_metric_label_values_for_keys(
+        self, metric_name: DEFINED_PROMETHEUS_METRICS, keys: tuple[UserAPIKeyAuth, ...]
+    ) -> frozenset[tuple[str | None, ...]]:
+        return frozenset(
+            self._budget_metric_label_values_for_enum_values(
+                metric_name, UserAPIKeyLabelValues(hashed_api_key=key.token, api_key_alias=key.key_alias or "")
+            )
+            for key in keys
+        )
+
+    def _budget_metric_label_values_for_enum_values(
+        self, metric_name: DEFINED_PROMETHEUS_METRICS, enum_values: UserAPIKeyLabelValues
+    ) -> tuple[str | None, ...]:
+        labels: Final = prometheus_label_factory(
+            supported_enum_labels=self.get_labels_for_metric(metric_name), enum_values=enum_values
+        )
+        return tuple(labels[label] for label in self.get_labels_for_metric(metric_name))
 
     async def _initialize_team_budget_metrics(self):
         """

@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import sys
 from datetime import datetime, timedelta, timezone
+from types import ModuleType
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -1864,6 +1866,60 @@ async def test_initialize_api_key_budget_metrics(prometheus_logger):
         prometheus_logger.litellm_api_key_max_budget_metric.assert_has_calls(
             expected_max_budget_calls, any_order=True
         )
+
+
+@pytest.mark.asyncio
+async def test_initialize_budget_metrics_removes_deleted_team_and_key_series(prometheus_logger):
+    proxy_server_module = ModuleType("litellm.proxy.proxy_server")
+    setattr(proxy_server_module, "prisma_client", MagicMock())
+    with patch.dict(sys.modules, {"litellm.proxy.proxy_server": proxy_server_module}):
+        first_team = MagicMock(
+            team_id="deleted-team", team_alias="deleted-alias", max_budget=100, spend=30, budget_reset_at=None
+        )
+        current_team = MagicMock(
+            team_id="current-team", team_alias="current-alias", max_budget=200, spend=50, budget_reset_at=None
+        )
+
+        async def fetch_first_team_page(page_size: int, page: int):
+            return ([first_team], 51) if page == 1 else ([current_team], 51)
+
+        async def fetch_failed_team_page(page_size: int, page: int):
+            raise RuntimeError("database unavailable")
+
+        async def fetch_current_team_page(page_size: int, page: int):
+            return [current_team], 1
+
+        await prometheus_logger._initialize_budget_metrics(
+            fetch_first_team_page, prometheus_logger._set_team_list_budget_metrics, "teams"
+        )
+        await prometheus_logger._initialize_budget_metrics(
+            fetch_failed_team_page, prometheus_logger._set_team_list_budget_metrics, "teams"
+        )
+        assert ("deleted-team", "deleted-alias") in prometheus_logger.litellm_remaining_team_budget_metric._metrics
+        await prometheus_logger._initialize_budget_metrics(
+            fetch_current_team_page, prometheus_logger._set_team_list_budget_metrics, "teams"
+        )
+
+        first_key = UserAPIKeyAuth(token="deleted-key", key_alias="deleted-alias", max_budget=100, spend=30)
+        current_key = UserAPIKeyAuth(token="current-key", key_alias="current-alias", max_budget=200, spend=50)
+
+        async def fetch_first_key_page(page_size: int, page: int):
+            return [first_key], 1
+
+        async def fetch_current_key_page(page_size: int, page: int):
+            return [current_key], 1
+
+        await prometheus_logger._initialize_budget_metrics(
+            fetch_first_key_page, prometheus_logger._set_key_list_budget_metrics, "keys"
+        )
+        await prometheus_logger._initialize_budget_metrics(
+            fetch_current_key_page, prometheus_logger._set_key_list_budget_metrics, "keys"
+        )
+
+    assert ("deleted-team", "deleted-alias") not in prometheus_logger.litellm_remaining_team_budget_metric._metrics
+    assert ("current-team", "current-alias") in prometheus_logger.litellm_remaining_team_budget_metric._metrics
+    assert ("deleted-key", "deleted-alias") not in prometheus_logger.litellm_remaining_api_key_budget_metric._metrics
+    assert ("current-key", "current-alias") in prometheus_logger.litellm_remaining_api_key_budget_metric._metrics
 
 
 def test_set_team_budget_metrics_multiple_teams(prometheus_logger):
