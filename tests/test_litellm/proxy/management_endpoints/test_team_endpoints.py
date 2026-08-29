@@ -13432,3 +13432,51 @@ async def test_team_member_update_skips_invalidation_when_no_budget_fields_sent(
 
     assert await real_cache.async_get_cache(key="team-1_member-1") == "still-fresh-membership"
     assert real_spend_counter_cache.in_memory_cache.get_cache(key="spend:team_member:member-1:team-1") == 1.5
+
+
+def test_set_budget_reset_at_updates_unique_matching_team_window_from_scalar_edit():
+    from litellm.proxy.management_endpoints.team_endpoints import _set_budget_reset_at
+
+    updated_kv = {"max_budget": 20.0}
+    existing_team = LiteLLM_TeamTable(
+        team_id="team-1",
+        max_budget=5.0,
+        budget_duration="7d",
+        budget_limits=[
+            {"budget_duration": "7d", "max_budget": 5.0, "reset_at": "2026-01-08T00:00:00+00:00"},
+        ],
+    )
+
+    _set_budget_reset_at(
+        data=UpdateTeamRequest(team_id="team-1", max_budget=20.0),
+        updated_kv=updated_kv,
+        existing_team_row=existing_team,
+    )
+
+    window = updated_kv["budget_limits"][0]
+    assert window["budget_duration"] == "7d"
+    assert window["max_budget"] == 20.0
+    assert window["reset_at"].isoformat() == "2026-01-08T00:00:00+00:00"
+
+
+def test_set_budget_reset_at_removes_unique_matching_team_window_when_scalar_budget_is_cleared():
+    from litellm.proxy.management_endpoints.team_endpoints import _set_budget_reset_at
+
+    updated_kv = {"max_budget": None}
+    existing_team = LiteLLM_TeamTable(
+        team_id="team-1",
+        max_budget=5.0,
+        budget_duration="7d",
+        budget_limits=[
+            {"budget_duration": "7d", "max_budget": 5.0, "reset_at": "2026-01-08T00:00:00+00:00"},
+            {"budget_duration": "30d", "max_budget": 10.0, "reset_at": "2026-01-31T00:00:00+00:00"},
+        ],
+    )
+
+    _set_budget_reset_at(
+        data=UpdateTeamRequest(team_id="team-1", max_budget=None),
+        updated_kv=updated_kv,
+        existing_team_row=existing_team,
+    )
+
+    assert updated_kv["budget_limits"] == [existing_team.budget_limits[1].model_dump()]

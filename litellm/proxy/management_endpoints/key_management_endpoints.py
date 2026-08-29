@@ -2074,7 +2074,41 @@ async def prepare_key_update_data(
             non_default_values["budget_reset_at"] = key_reset_at
             non_default_values["budget_duration"] = budget_duration
 
-    if "budget_limits" in non_default_values:
+    if "budget_limits" not in non_default_values and (
+        "max_budget" in non_default_values or "budget_duration" in non_default_values
+    ):
+        existing_windows: Final = existing_key_row.budget_limits or []
+        matching_indices: Final = tuple(
+            index
+            for index, window in enumerate(existing_windows)
+            if window.get("max_budget") == existing_key_row.max_budget
+            and window.get("budget_duration") == existing_key_row.budget_duration
+        )
+        updated_budget_duration: Final = non_default_values.get("budget_duration", existing_key_row.budget_duration)
+        updated_max_budget: Final = non_default_values.get("max_budget", existing_key_row.max_budget)
+        if len(matching_indices) == 1 and (updated_budget_duration is None or updated_max_budget is None):
+            matching_index: Final = matching_indices[0]
+            non_default_values["budget_limits"] = json.dumps(
+                [window for index, window in enumerate(existing_windows) if index != matching_index]
+            )
+        elif len(matching_indices) == 1:
+            matching_index: Final = matching_indices[0]
+            existing_window: Final = existing_windows[matching_index]
+            updated_window: Final = {
+                **existing_window,
+                "max_budget": updated_max_budget,
+                "budget_duration": updated_budget_duration,
+                "reset_at": (
+                    get_budget_reset_time(budget_duration=updated_budget_duration).isoformat()
+                    if updated_budget_duration != existing_key_row.budget_duration
+                    else existing_window.get("reset_at")
+                ),
+            }
+            non_default_values["budget_limits"] = json.dumps(
+                [updated_window if index == matching_index else window for index, window in enumerate(existing_windows)]
+            )
+
+    if "budget_limits" in data_json:
         raw_windows: Final = non_default_values["budget_limits"]
         if raw_windows:
             from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time

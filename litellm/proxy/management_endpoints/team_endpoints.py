@@ -2176,7 +2176,11 @@ async def update_team(
             )
 
         # Check budget_duration and budget_reset_at
-        _set_budget_reset_at(data, updated_kv)
+        _set_budget_reset_at(
+            data=data,
+            updated_kv=updated_kv,
+            existing_team_row=LiteLLM_TeamTable.model_validate(existing_team_row.model_dump()),
+        )
 
         _team_member_fields_in_request: Final = {
             field
@@ -2380,8 +2384,12 @@ async def patch_team(
         raise handle_exception_on_proxy(e)
 
 
-def _set_budget_reset_at(data: UpdateTeamRequest, updated_kv: dict) -> None:
-    """Set budget_reset_at in updated_kv if budget_duration is provided."""
+def _set_budget_reset_at(
+    data: UpdateTeamRequest,
+    updated_kv: dict,
+    existing_team_row: LiteLLM_TeamTable | None = None,
+) -> None:
+    """Set budget reset fields for a team update."""
     if data.budget_duration is not None:
         from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time
 
@@ -2389,6 +2397,40 @@ def _set_budget_reset_at(data: UpdateTeamRequest, updated_kv: dict) -> None:
         updated_kv["budget_reset_at"] = reset_at
     elif "budget_duration" in updated_kv and updated_kv["budget_duration"] is None:
         updated_kv["budget_reset_at"] = None
+
+    if (
+        existing_team_row is not None
+        and "budget_limits" not in updated_kv
+        and ("max_budget" in updated_kv or "budget_duration" in updated_kv)
+    ):
+        existing_windows: Final = existing_team_row.budget_limits or []
+        matching_indices: Final = tuple(
+            index
+            for index, window in enumerate(existing_windows)
+            if window.max_budget == existing_team_row.max_budget
+            and window.budget_duration == existing_team_row.budget_duration
+        )
+        updated_budget_duration: Final = updated_kv.get("budget_duration", existing_team_row.budget_duration)
+        updated_max_budget: Final = updated_kv.get("max_budget", existing_team_row.max_budget)
+        if len(matching_indices) == 1 and (updated_budget_duration is None or updated_max_budget is None):
+            matching_index: Final = matching_indices[0]
+            updated_kv["budget_limits"] = [
+                window.model_dump() for index, window in enumerate(existing_windows) if index != matching_index
+            ]
+        elif len(matching_indices) == 1:
+            matching_index: Final = matching_indices[0]
+            existing_window: Final = existing_windows[matching_index]
+            updated_window: Final = existing_window.model_dump()
+            updated_window["max_budget"] = updated_max_budget
+            updated_window["budget_duration"] = updated_budget_duration
+            if updated_budget_duration != existing_team_row.budget_duration:
+                from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time
+
+                updated_window["reset_at"] = get_budget_reset_time(budget_duration=updated_budget_duration).isoformat()
+            updated_kv["budget_limits"] = [
+                updated_window if index == matching_index else window.model_dump()
+                for index, window in enumerate(existing_windows)
+            ]
 
     if data.budget_limits is not None and len(data.budget_limits) > 0:
         from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time

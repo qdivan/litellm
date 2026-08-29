@@ -2086,6 +2086,115 @@ async def test_prepare_key_update_data_budget_limits_serializes_windows():
 
 
 @pytest.mark.asyncio
+async def test_prepare_key_update_data_updates_unique_matching_budget_window_from_scalar_edit():
+    from litellm.proxy._types import UpdateKeyRequest
+    from litellm.proxy.management_endpoints.key_management_endpoints import (
+        prepare_key_update_data,
+    )
+
+    reset_at = "2026-01-08T00:00:00+00:00"
+    existing_key = LiteLLM_VerificationToken(
+        token="test-token",
+        max_budget=5.0,
+        budget_duration="7d",
+        budget_limits=[
+            {"budget_duration": "7d", "max_budget": 5.0, "reset_at": reset_at},
+        ],
+    )
+
+    result = await prepare_key_update_data(
+        data=UpdateKeyRequest(key="test-token", max_budget=20.0),
+        existing_key_row=existing_key,
+    )
+
+    assert result["max_budget"] == 20.0
+    assert json.loads(result["budget_limits"]) == [
+        {"budget_duration": "7d", "max_budget": 20.0, "reset_at": reset_at},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_key_update_data_rearms_unique_matching_window_when_duration_changes():
+    from litellm.proxy._types import UpdateKeyRequest
+    from litellm.proxy.management_endpoints.key_management_endpoints import (
+        prepare_key_update_data,
+    )
+
+    reset_at = "2026-01-08T00:00:00+00:00"
+    existing_key = LiteLLM_VerificationToken(
+        token="test-token",
+        max_budget=5.0,
+        budget_duration="7d",
+        budget_limits=[
+            {"budget_duration": "7d", "max_budget": 5.0, "reset_at": reset_at},
+        ],
+    )
+
+    result = await prepare_key_update_data(
+        data=UpdateKeyRequest(key="test-token", budget_duration="30d"),
+        existing_key_row=existing_key,
+    )
+
+    window = json.loads(result["budget_limits"])[0]
+    assert window["max_budget"] == 5.0
+    assert window["budget_duration"] == "30d"
+    assert window["reset_at"] != reset_at
+
+
+@pytest.mark.asyncio
+async def test_prepare_key_update_data_preserves_ambiguous_budget_windows_from_scalar_edit():
+    from litellm.proxy._types import UpdateKeyRequest
+    from litellm.proxy.management_endpoints.key_management_endpoints import (
+        prepare_key_update_data,
+    )
+
+    existing_key = LiteLLM_VerificationToken(
+        token="test-token",
+        max_budget=5.0,
+        budget_duration="7d",
+        budget_limits=[
+            {"budget_duration": "7d", "max_budget": 5.0, "reset_at": "2026-01-08T00:00:00+00:00"},
+            {"budget_duration": "7d", "max_budget": 5.0, "reset_at": "2026-01-09T00:00:00+00:00"},
+        ],
+    )
+
+    result = await prepare_key_update_data(
+        data=UpdateKeyRequest(key="test-token", max_budget=20.0),
+        existing_key_row=existing_key,
+    )
+
+    assert "budget_limits" not in result
+
+
+@pytest.mark.asyncio
+async def test_prepare_key_update_data_removes_unique_matching_window_when_scalar_budget_is_cleared():
+    from litellm.proxy._types import UpdateKeyRequest
+    from litellm.proxy.management_endpoints.key_management_endpoints import (
+        prepare_key_update_data,
+    )
+
+    existing_key = LiteLLM_VerificationToken(
+        token="test-token",
+        max_budget=5.0,
+        budget_duration="7d",
+        budget_limits=[
+            {"budget_duration": "7d", "max_budget": 5.0, "reset_at": "2026-01-08T00:00:00+00:00"},
+            {"budget_duration": "30d", "max_budget": 10.0, "reset_at": "2026-01-31T00:00:00+00:00"},
+        ],
+    )
+
+    result = await prepare_key_update_data(
+        data=UpdateKeyRequest(key="test-token", max_budget=None),
+        existing_key_row=existing_key,
+    )
+
+    assert result["max_budget"] is None
+    assert json.loads(result["budget_limits"]) == [
+        {"budget_duration": "30d", "max_budget": 10.0, "reset_at": "2026-01-31T00:00:00+00:00"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prepare_key_update_data_disable_global_guardrails_false_no_premium(
     monkeypatch,
 ):
