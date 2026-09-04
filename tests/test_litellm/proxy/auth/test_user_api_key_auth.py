@@ -5784,7 +5784,7 @@ def _proxy_attrs_for_db_lookup():
     }
 
 
-async def _run_builder_with_key_lookup(get_key_object_mock):
+async def _run_builder_with_key_lookup(get_key_object_mock, api_key="Bearer sk-redaction-regression-key"):
     """Drive the real auth builder with ``get_key_object`` replaced by the
     given mock. Returns the builder result. Patches ``seed_request_identity``
     so the failure path doesn't touch OTEL."""
@@ -5812,7 +5812,7 @@ async def _run_builder_with_key_lookup(get_key_object_mock):
         ):
             return await _user_api_key_auth_builder(
                 request=request,
-                api_key="Bearer sk-db-lookup-test",
+                api_key=api_key,
                 azure_api_key_header="",
                 anthropic_api_key_header=None,
                 google_ai_studio_api_key_header=None,
@@ -5851,11 +5851,18 @@ async def test_builder_returns_401_when_db_lookup_reports_missing_key():
         code=status.HTTP_401_UNAUTHORIZED,
     )
     get_key_object = AsyncMock(side_effect=missing_key_error)
+    submitted_key = "sk-redaction-regression-key"
 
     with pytest.raises(ProxyException) as exc_info:
-        await _run_builder_with_key_lookup(get_key_object)
+        await _run_builder_with_key_lookup(get_key_object, api_key=f"Bearer {submitted_key}")
 
     assert int(exc_info.value.code) == status.HTTP_401_UNAUTHORIZED
+    from litellm.proxy.proxy_server import hash_token
+
+    assert get_key_object.await_args.args == (hash_token(submitted_key),)
+    assert exc_info.value.message == "Authentication Error, Invalid proxy server token passed."
+    assert "Key Hash" not in exc_info.value.message
+    assert "LiteLLM_VerificationTokenTable" not in exc_info.value.message
 
 
 @pytest.mark.asyncio

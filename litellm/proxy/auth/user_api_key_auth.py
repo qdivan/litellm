@@ -1890,10 +1890,8 @@ async def _user_api_key_auth_builder(
                         type(api_key) if api_key is not None else "None"
                     )
                 )
-            abbreviated_api_key: Final = abbreviate_api_key(api_key=api_key)
             if api_key.startswith("sk-"):
                 api_key = hash_token(token=api_key)
-
             try:
                 with tracer.trace("litellm.proxy.auth.get_key_object_from_db"):
                     valid_token = IdentityStore.key_from_principal(
@@ -1906,7 +1904,7 @@ async def _user_api_key_auth_builder(
                     )
             except ProxyException as e:
                 if e.code == 401 or e.code == "401":
-                    e.message = f"Authentication Error, Invalid proxy server token passed. Received API Key = {abbreviated_api_key}, Key Hash (Token) ={api_key}. Unable to find token in cache or `LiteLLM_VerificationTokenTable`"
+                    e.message = "Authentication Error, Invalid proxy server token passed."
                 raise e
             # update end-user params on valid token
             # These can change per request - it's important to update them here
