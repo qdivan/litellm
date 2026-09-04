@@ -207,6 +207,14 @@ class TestUpdateMetadataFieldsEmptyCollections:
         mock_premium_check.assert_not_called()
 
 
+def test_update_metadata_fields_keeps_team_blocked_column():
+    updated_kv = {"team_id": "test-team", "blocked": True}
+
+    _update_metadata_fields(updated_kv=updated_kv)
+
+    assert updated_kv == {"team_id": "test-team", "blocked": True}
+
+
 class TestUserHasAdminView:
     """Tests for _user_has_admin_view function."""
 
