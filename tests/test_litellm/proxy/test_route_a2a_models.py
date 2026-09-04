@@ -4,19 +4,18 @@ Test A2A model routing in proxy.
 Maps to: litellm/proxy/agent_endpoints/a2a_routing.py
 """
 
-
-
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from litellm.proxy.agent_endpoints.a2a_routing import route_a2a_agent_request
 from litellm.proxy.route_llm_request import route_request
 
 
 @pytest.mark.asyncio
 async def test_route_a2a_model_bypasses_router():
     """Test that a2a/ prefixed models bypass router and go directly to litellm with api_base"""
+
+    from litellm.types.agents import AgentResponse
 
     # Mock data for chat completion with a2a model
     data = {
@@ -35,9 +34,6 @@ async def test_route_a2a_model_bypasses_router():
     mock_router.default_deployment = None
     mock_router.pattern_router = Mock(patterns=[])
     mock_router.map_team_model = Mock(return_value=None)
-
-    # Mock agent in registry
-    from litellm.types.agents import AgentResponse
 
     mock_agent = AgentResponse(
         agent_id="test-agent-id",
@@ -58,7 +54,7 @@ async def test_route_a2a_model_bypasses_router():
             "litellm.proxy.agent_endpoints.agent_registry.global_agent_registry",
             mock_registry,
         ):
-            result = await route_request(
+            await route_request(
                 data=data,
                 llm_router=mock_router,
                 user_model=None,
@@ -70,6 +66,48 @@ async def test_route_a2a_model_bypasses_router():
             call_kwargs = mock_acompletion.call_args.kwargs
             assert call_kwargs["model"] == "a2a/test-agent"
             assert call_kwargs["api_base"] == "http://agent.example.com"
+
+
+@pytest.mark.asyncio
+async def test_route_a2a_model_is_checked_before_recognized_router_model(monkeypatch):
+    from fastapi import HTTPException
+
+    from litellm.proxy.agent_endpoints import agent_registry
+    from litellm.proxy.agent_endpoints.auth.agent_permission_handler import AgentRequestHandler
+    from litellm.types.agents import AgentResponse
+
+    data = {
+        "model": "a2a/restricted-agent",
+        "messages": [{"role": "user", "content": "Hello"}],
+    }
+    mock_router = _router_without_models()
+    mock_router.is_recognized_model = Mock(return_value=True)
+
+    mock_agent = AgentResponse(
+        agent_id="restricted-agent-id",
+        agent_name="restricted-agent",
+        agent_card_params={"url": "http://agent.example.com"},
+        litellm_params=None,
+    )
+    mock_registry = Mock()
+    mock_registry.get_agent_by_id = Mock(return_value=None)
+    mock_registry.get_agent_by_name = Mock(return_value=mock_agent)
+
+    async def deny_agent(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(agent_registry, "global_agent_registry", mock_registry)
+    monkeypatch.setattr(AgentRequestHandler, "is_agent_allowed", staticmethod(deny_agent))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await route_request(
+            data=data,
+            llm_router=mock_router,
+            user_model=None,
+            route_type="acompletion",
+        )
+
+    assert exc_info.value.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -141,7 +179,7 @@ def _router_without_models():
 
 @pytest.mark.asyncio
 async def test_route_a2a_model_read_through_recovers_agent_created_on_sibling_replica(monkeypatch):
-    import litellm.proxy.proxy_server as proxy_server
+    from litellm.proxy import proxy_server
     from litellm.proxy.agent_endpoints.agent_registry import global_agent_registry
 
     agent_name = "a2a-sibling-replica-agent"
