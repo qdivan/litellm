@@ -713,22 +713,73 @@ def test_update_internal_user_params_email():
     assert "budget_duration" not in non_default_values  # Should not add default values
 
 
-@pytest.mark.parametrize("blocked", [False, True])
-def test_update_internal_user_params_filters_blocked_from_user_table(blocked):
-    """`/user/update` must not pass its unsupported `blocked` field to LiteLLM_UserTable."""
-    from litellm.proxy._types import UpdateUserRequest
-    from litellm.proxy.management_endpoints.internal_user_endpoints import (
-        _update_internal_user_params,
+@pytest.fixture
+def _blocked_rejecting_user_prisma(mocker):
+    import inspect
+
+    from prisma.errors import FieldNotFoundError
+
+    from litellm.models.user import LiteLLM_UserTable
+    from litellm.proxy.utils import PrismaClient
+
+    user_table = mocker.MagicMock()
+    user_table.find_first = mocker.AsyncMock(
+        return_value=LiteLLM_UserTable(user_id="target-user", user_email="original@example.com")
     )
 
-    data = UpdateUserRequest(user_id="test_user_id", blocked=blocked)
+    async def upsert(*, where, data):
+        for operation in ("create", "update"):
+            if "blocked" in data[operation]:
+                raise FieldNotFoundError(
+                    data,
+                    message=(f"Could not find field `blocked` in LiteLLM_UserTable {operation} payload"),
+                )
+        return LiteLLM_UserTable(user_id=where["user_id"], user_email=data["update"]["user_email"])
 
-    non_default_values = _update_internal_user_params(
-        data_json=data.model_dump(exclude_unset=True), data=data
+    user_table.upsert = mocker.AsyncMock(side_effect=upsert)
+    prisma_client = mocker.MagicMock()
+    prisma_client.db.litellm_usertable = user_table
+    prisma_client.jsonify_object = mocker.MagicMock(side_effect=lambda data: dict(data))
+    prisma_client.proxy_logging_obj.failure_handler = mocker.AsyncMock()
+
+    async def update_data(**kwargs):
+        return await inspect.unwrap(PrismaClient.update_data)(prisma_client, **kwargs)
+
+    prisma_client.update_data = update_data
+    mocker.patch("litellm.proxy.proxy_server.prisma_client", prisma_client)
+    mocker.patch(
+        "litellm.proxy.management_endpoints.internal_user_endpoints._schedule_user_update_audit_log",
+        new=mocker.AsyncMock(),
+    )
+    return user_table
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra_request_data",
+    [{"blocked": False}, {"blocked": True}, {}],
+    ids=["blocked-false", "blocked-true", "blocked-omitted"],
+)
+async def test_user_update_does_not_send_blocked_to_user_table_upsert(
+    _blocked_rejecting_user_prisma, extra_request_data
+):
+    from litellm.proxy.management_endpoints.internal_user_endpoints import user_update
+
+    response = await user_update(
+        data=UpdateUserRequest(
+            user_id="target-user",
+            user_email="updated@example.com",
+            **extra_request_data,
+        ),
+        user_api_key_dict=UserAPIKeyAuth(user_id="admin", user_role=LitellmUserRoles.PROXY_ADMIN),
     )
 
-    assert non_default_values == {"user_id": "test_user_id"}
-    assert "blocked" not in non_default_values
+    upsert_data = _blocked_rejecting_user_prisma.upsert.call_args.kwargs["data"]
+    assert response["user_id"] == "target-user"
+    assert upsert_data["create"]["user_email"] == "updated@example.com"
+    assert upsert_data["update"]["user_email"] == "updated@example.com"
+    assert "blocked" not in upsert_data["create"]
+    assert "blocked" not in upsert_data["update"]
 
 
 def test_update_internal_user_params_reset_spend_and_max_budget():
